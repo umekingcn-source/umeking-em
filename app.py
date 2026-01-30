@@ -1723,19 +1723,39 @@ if st.session_state.emails is not None:
                     wait_seconds = scheduled_info['wait_seconds']
                     target_time_str = scheduled_info['target_time_target_tz'].strftime('%Y-%m-%d %H:%M')
                     local_time_str = scheduled_info['target_time_local'].strftime('%Y-%m-%d %H:%M')
+                    total_emails = len(st.session_state.emails)
                     
-                    st.info(f"""
-                    ⏰ **定时发送已启动**
-                    - 目标时间: {target_time_str} ({scheduled_info['target_tz_name']})
-                    - 中国时间: {local_time_str}
-                    - 等待时间: {format_wait_time(wait_seconds)}
+                    # 创建醒目的状态容器
+                    status_container = st.container()
                     
-                    ⚠️ **请保持此页面打开，不要关闭浏览器**
-                    """)
+                    with status_container:
+                        st.markdown(f"""
+                        <div style="background: linear-gradient(135deg, rgba(45, 139, 78, 0.2), rgba(201, 162, 39, 0.2)); 
+                                    padding: 25px; border-radius: 15px; text-align: center; 
+                                    border: 2px solid rgba(45, 139, 78, 0.5); margin: 20px 0;">
+                            <div style="color: #2D8B4E; font-size: 1.8rem; font-weight: bold; margin-bottom: 15px;">
+                                ✅ 定时发送任务已成功启动！
+                            </div>
+                            <div style="color: #FAF8F5; font-size: 1rem; line-height: 1.8;">
+                                📧 待发送邮件: <b>{total_emails}</b> 封<br>
+                                🌍 目标时区: <b>{scheduled_info['target_tz_name']}</b><br>
+                                ⏰ 发送时间: <b>{target_time_str}</b> (目标时区)<br>
+                                🇨🇳 中国时间: <b>{local_time_str}</b>
+                            </div>
+                            <div style="color: #C9A227; font-size: 0.9rem; margin-top: 15px; padding: 10px; 
+                                        background: rgba(201, 162, 39, 0.1); border-radius: 8px;">
+                                ⚠️ 请保持此页面打开，不要关闭浏览器或刷新页面
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
                     
-                    # 倒计时显示
-                    countdown_placeholder = st.empty()
-                    progress_placeholder = st.empty()
+                    # 倒计时显示区域
+                    countdown_container = st.container()
+                    
+                    with countdown_container:
+                        countdown_placeholder = st.empty()
+                        progress_placeholder = st.empty()
+                        status_placeholder = st.empty()
                     
                     # 倒计时等待
                     remaining = wait_seconds
@@ -1749,26 +1769,93 @@ if st.session_state.emails is not None:
                         progress = 1 - (remaining / wait_seconds) if wait_seconds > 0 else 1
                         progress_placeholder.progress(progress)
                         
+                        # 计算剩余时间
+                        hours_left = int(remaining // 3600)
+                        mins_left = int((remaining % 3600) // 60)
+                        secs_left = int(remaining % 60)
+                        
                         # 更新倒计时显示
                         countdown_placeholder.markdown(f"""
-                        <div style="background: rgba(201, 162, 39, 0.15); padding: 20px; border-radius: 10px; text-align: center; border: 1px solid rgba(201, 162, 39, 0.4);">
-                            <div style="color: #C9A227; font-size: 1.5rem; font-weight: bold;">⏳ 距离发送还有</div>
-                            <div style="color: #FAF8F5; font-size: 2.5rem; font-weight: bold; margin: 15px 0;">{format_wait_time(remaining)}</div>
-                            <div style="color: #E8D5B7; font-size: 0.9rem;">目标时间: {target_time_str}</div>
+                        <div style="background: rgba(201, 162, 39, 0.15); padding: 30px; border-radius: 15px; 
+                                    text-align: center; border: 2px solid rgba(201, 162, 39, 0.4); margin: 20px 0;">
+                            <div style="color: #C9A227; font-size: 1.2rem; font-weight: bold; margin-bottom: 10px;">
+                                ⏳ 距离发送还有
+                            </div>
+                            <div style="display: flex; justify-content: center; gap: 20px; margin: 20px 0;">
+                                <div style="background: rgba(10, 15, 26, 0.6); padding: 15px 25px; border-radius: 10px;">
+                                    <div style="color: #C9A227; font-size: 2.5rem; font-weight: bold;">{hours_left:02d}</div>
+                                    <div style="color: #E8D5B7; font-size: 0.8rem;">小时</div>
+                                </div>
+                                <div style="color: #C9A227; font-size: 2.5rem; font-weight: bold; line-height: 60px;">:</div>
+                                <div style="background: rgba(10, 15, 26, 0.6); padding: 15px 25px; border-radius: 10px;">
+                                    <div style="color: #C9A227; font-size: 2.5rem; font-weight: bold;">{mins_left:02d}</div>
+                                    <div style="color: #E8D5B7; font-size: 0.8rem;">分钟</div>
+                                </div>
+                                <div style="color: #C9A227; font-size: 2.5rem; font-weight: bold; line-height: 60px;">:</div>
+                                <div style="background: rgba(10, 15, 26, 0.6); padding: 15px 25px; border-radius: 10px;">
+                                    <div style="color: #C9A227; font-size: 2.5rem; font-weight: bold;">{secs_left:02d}</div>
+                                    <div style="color: #E8D5B7; font-size: 0.8rem;">秒</div>
+                                </div>
+                            </div>
+                            <div style="color: #E8D5B7; font-size: 0.9rem;">
+                                🎯 目标时间: {target_time_str} | 进度: {progress*100:.1f}%
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # 状态提示
+                        status_placeholder.markdown(f"""
+                        <div style="text-align: center; color: #8B7355; font-size: 0.85rem;">
+                            🔄 系统正在等待中... 当前进度 {progress*100:.1f}% | 请勿关闭页面
                         </div>
                         """, unsafe_allow_html=True)
                         
                         # 每秒更新一次
                         time.sleep(1)
                     
+                    # 清除倒计时显示
                     countdown_placeholder.empty()
                     progress_placeholder.empty()
-                    st.success("⏰ 定时时间已到，开始发送邮件...")
+                    status_placeholder.empty()
+                    
+                    # 显示开始发送提示
+                    st.markdown("""
+                    <div style="background: linear-gradient(135deg, rgba(45, 139, 78, 0.3), rgba(45, 139, 78, 0.1)); 
+                                padding: 20px; border-radius: 10px; text-align: center; 
+                                border: 2px solid rgba(45, 139, 78, 0.5); margin: 20px 0;">
+                        <div style="color: #2D8B4E; font-size: 1.5rem; font-weight: bold;">
+                            🚀 定时时间已到！正在开始发送邮件...
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # 短暂延迟让用户看到提示
+                    time.sleep(1)
                 
                 # 开始发送邮件
                 send_results = []
-                progress_bar = st.progress(0)
-                status_text = st.empty()
+                total_to_send = len(st.session_state.emails)
+                
+                # 创建发送状态显示区域
+                send_status_container = st.container()
+                
+                with send_status_container:
+                    st.markdown(f"""
+                    <div style="background: rgba(45, 139, 78, 0.15); padding: 15px; border-radius: 10px; 
+                                text-align: center; border: 1px solid rgba(45, 139, 78, 0.3); margin-bottom: 15px;">
+                        <div style="color: #2D8B4E; font-size: 1.2rem; font-weight: bold;">
+                            📤 正在发送邮件中...
+                        </div>
+                        <div style="color: #E8D5B7; font-size: 0.9rem; margin-top: 5px;">
+                            共 {total_to_send} 封邮件待发送
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    current_email_display = st.empty()
+                    success_count_display = st.empty()
                 
                 # 准备 SMTP 设置
                 smtp_settings = {
@@ -1784,15 +1871,43 @@ if st.session_state.emails is not None:
                     marketing_image.seek(0)
                     image_data = marketing_image.read()
                 
+                success_count = 0
+                fail_count = 0
+                
                 for i, email in enumerate(st.session_state.emails):
                     # 发送延迟：模拟真人操作，避免被邮件服务商封号
                     if i > 0:
                         delay = random.uniform(5, 10)  # 随机 5-10 秒延迟
-                        status_text.text(f"⏳ Waiting {delay:.1f}s before next email...")
-                        time.sleep(delay)
+                        for countdown in range(int(delay), 0, -1):
+                            status_text.markdown(f"""
+                            <div style="color: #C9A227; font-size: 0.9rem;">
+                                ⏳ 等待 {countdown} 秒后发送下一封（避免触发垃圾邮件过滤）...
+                            </div>
+                            """, unsafe_allow_html=True)
+                            time.sleep(1)
                     
-                    status_text.text(f"📤 Sending ({i+1}/{len(st.session_state.emails)}): {email['to_email']}...")
-                    progress_bar.progress((i + 1) / len(st.session_state.emails))
+                    # 显示当前发送的邮件
+                    current_email_display.markdown(f"""
+                    <div style="background: rgba(26, 37, 64, 0.5); padding: 12px; border-radius: 8px; 
+                                border-left: 3px solid #C9A227;">
+                        <div style="color: #C9A227; font-weight: bold;">
+                            📧 正在发送 ({i+1}/{total_to_send})
+                        </div>
+                        <div style="color: #FAF8F5; margin-top: 5px;">
+                            公司: {email['company']}<br>
+                            收件人: {email['to_email']}<br>
+                            类型: {email.get('email_type', '通用')}邮箱
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    status_text.markdown(f"""
+                    <div style="color: #E8D5B7; font-size: 0.9rem;">
+                        🔄 正在连接邮件服务器并发送...
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    progress_bar.progress((i + 1) / total_to_send)
                     
                     success, message = send_email(
                         smtp_settings=smtp_settings,
@@ -1801,6 +1916,19 @@ if st.session_state.emails is not None:
                         body_text=email['body'],
                         image_data=image_data
                     )
+                    
+                    if success:
+                        success_count += 1
+                    else:
+                        fail_count += 1
+                    
+                    # 更新成功/失败计数
+                    success_count_display.markdown(f"""
+                    <div style="display: flex; justify-content: center; gap: 30px; margin-top: 10px;">
+                        <div style="color: #2D8B4E; font-weight: bold;">✅ 成功: {success_count}</div>
+                        <div style="color: #A83232; font-weight: bold;">❌ 失败: {fail_count}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
                     
                     send_results.append({
                         'company': email['company'],
@@ -1822,8 +1950,31 @@ if st.session_state.emails is not None:
                         'actual_send_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     }
                 
-                status_text.empty()
-                progress_bar.empty()
+                # 显示发送完成提示
+                st.markdown(f"""
+                <div style="background: linear-gradient(135deg, rgba(45, 139, 78, 0.3), rgba(45, 139, 78, 0.1)); 
+                            padding: 25px; border-radius: 15px; text-align: center; 
+                            border: 2px solid rgba(45, 139, 78, 0.5); margin: 20px 0;">
+                    <div style="color: #2D8B4E; font-size: 2rem; font-weight: bold; margin-bottom: 15px;">
+                        🎉 发送完成！
+                    </div>
+                    <div style="display: flex; justify-content: center; gap: 50px; margin: 20px 0;">
+                        <div>
+                            <div style="color: #2D8B4E; font-size: 2.5rem; font-weight: bold;">{success_count}</div>
+                            <div style="color: #E8D5B7;">成功发送</div>
+                        </div>
+                        <div>
+                            <div style="color: #A83232; font-size: 2.5rem; font-weight: bold;">{fail_count}</div>
+                            <div style="color: #E8D5B7;">发送失败</div>
+                        </div>
+                    </div>
+                    <div style="color: #E8D5B7; font-size: 0.9rem; margin-top: 10px;">
+                        页面将在 3 秒后自动刷新显示详细报告...
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                time.sleep(3)
                 st.rerun()
     
     with col2:
