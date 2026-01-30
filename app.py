@@ -1,7 +1,7 @@
 """
 Automated Email Marketing System
 ================================
-Upload Screenshot -> Extract Companies -> Research Decision Makers -> Generate Cold Emails -> Send
+Upload Screenshot -> Extract Companies -> Research Decision Makers -> Generate Cold Emails -> Send -> Monitor Bounces
 """
 
 import streamlit as st
@@ -9,11 +9,15 @@ import pandas as pd
 import requests
 import base64
 import smtplib
+import imaplib
+import email
+from email.header import decode_header
 import json
+import re
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
 import random
 import google.generativeai as genai
@@ -484,6 +488,16 @@ if 'send_results' not in st.session_state:
     st.session_state.send_results = None
 if 'current_step' not in st.session_state:
     st.session_state.current_step = 1
+# 退信监控相关
+if 'delivery_tracking' not in st.session_state:
+    st.session_state.delivery_tracking = None  # 邮件投递追踪记录
+if 'bounce_emails' not in st.session_state:
+    st.session_state.bounce_emails = []  # 检测到的退信列表
+if 'valid_emails' not in st.session_state:
+    st.session_state.valid_emails = []  # 有效送达的邮箱列表
+# 归档数据
+if 'archive_data' not in st.session_state:
+    st.session_state.archive_data = None  # 完整归档记录
 
 # ============================================
 # HELPER FUNCTIONS
@@ -834,6 +848,241 @@ def send_email(smtp_settings, to_email, subject, body_text, image_data=None):
         return False, str(e)
 
 # ============================================
+# BOUNCE MONITORING FUNCTIONS
+# ============================================
+
+def connect_imap(imap_settings: dict):
+    """Connect to IMAP server to check for bounce emails."""
+    try:
+        port = imap_settings['port']
+        if port == 993:
+            mail = imaplib.IMAP4_SSL(imap_settings['server'], port)
+        else:
+            mail = imaplib.IMAP4(imap_settings['server'], port)
+        
+        mail.login(imap_settings['email'], imap_settings['password'])
+        return mail, None
+    except Exception as e:
+        return None, str(e)
+
+def decode_email_header(header):
+    """Decode email header to readable string."""
+    if header is None:
+        return ""
+    decoded_parts = decode_header(header)
+    result = ""
+    for part, encoding in decoded_parts:
+        if isinstance(part, bytes):
+            result += part.decode(encoding or 'utf-8', errors='ignore')
+        else:
+            result += part
+    return result
+
+def extract_bounced_email(email_body: str) -> list:
+    """Extract bounced email addresses from bounce notification."""
+    # 常见的邮箱正则表达式
+    email_pattern = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
+    
+    # 查找所有邮箱地址
+    found_emails = re.findall(email_pattern, email_body)
+    
+    # 过滤掉常见的系统邮箱
+    system_emails = ['mailer-daemon', 'postmaster', 'noreply', 'no-reply', 'bounce', 'admin']
+    bounced_emails = []
+    
+    for addr in found_emails:
+        addr_lower = addr.lower()
+        if not any(sys_email in addr_lower for sys_email in system_emails):
+            if addr not in bounced_emails:
+                bounced_emails.append(addr)
+    
+    return bounced_emails
+
+def check_bounce_emails(imap_settings: dict, days_back: int = 7) -> tuple:
+    """
+    Check inbox for bounce notifications.
+    Returns: (bounce_list, error_message)
+    """
+    mail, error = connect_imap(imap_settings)
+    if error:
+        return [], f"IMAP connection failed: {error}"
+    
+    try:
+        # 选择收件箱
+        mail.select('INBOX')
+        
+        # 计算日期范围
+        since_date = (datetime.now() - timedelta(days=days_back)).strftime("%d-%b-%Y")
+        
+        # 搜索退信邮件（常见的退信发件人）
+        bounce_senders = [
+            'MAILER-DAEMON',
+            'postmaster',
+            'Mail Delivery Subsystem',
+            'Mail Delivery System'
+        ]
+        
+        # 搜索退信关键词
+        bounce_subjects = [
+            'Undelivered',
+            'Delivery Status Notification',
+            'Returned mail',
+            'Mail delivery failed',
+            'Delivery Failure',
+            'Undeliverable',
+            'failure notice',
+            'Returned to sender'
+        ]
+        
+        all_bounces = []
+        processed_ids = set()
+        
+        # 搜索包含退信关键词的邮件
+        for subject_keyword in bounce_subjects:
+            try:
+                search_criteria = f'(SINCE {since_date} SUBJECT "{subject_keyword}")'
+                status, messages = mail.search(None, search_criteria)
+                
+                if status == 'OK' and messages[0]:
+                    for msg_id in messages[0].split():
+                        if msg_id in processed_ids:
+                            continue
+                        processed_ids.add(msg_id)
+                        
+                        # 获取邮件内容
+                        status, msg_data = mail.fetch(msg_id, '(RFC822)')
+                        if status != 'OK':
+                            continue
+                        
+                        email_body_raw = msg_data[0][1]
+                        email_message = email.message_from_bytes(email_body_raw)
+                        
+                        # 解析邮件信息
+                        subject = decode_email_header(email_message['Subject'])
+                        from_addr = decode_email_header(email_message['From'])
+                        date_str = email_message['Date']
+                        
+                        # 获取邮件正文
+                        body_text = ""
+                        if email_message.is_multipart():
+                            for part in email_message.walk():
+                                content_type = part.get_content_type()
+                                if content_type == 'text/plain':
+                                    try:
+                                        body_text += part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                                    except:
+                                        pass
+                        else:
+                            try:
+                                body_text = email_message.get_payload(decode=True).decode('utf-8', errors='ignore')
+                            except:
+                                pass
+                        
+                        # 提取退信的目标邮箱
+                        bounced_addrs = extract_bounced_email(body_text)
+                        
+                        for addr in bounced_addrs:
+                            all_bounces.append({
+                                'bounced_email': addr,
+                                'bounce_subject': subject[:100],
+                                'bounce_from': from_addr[:50],
+                                'bounce_date': date_str,
+                                'reason': 'Delivery Failed'
+                            })
+            except Exception as e:
+                continue
+        
+        mail.logout()
+        return all_bounces, None
+        
+    except Exception as e:
+        try:
+            mail.logout()
+        except:
+            pass
+        return [], f"Error checking bounces: {str(e)}"
+
+def update_delivery_status(send_results_df: pd.DataFrame, bounce_list: list) -> pd.DataFrame:
+    """Update delivery status based on bounce detection."""
+    if send_results_df is None or len(send_results_df) == 0:
+        return send_results_df
+    
+    # 创建退信邮箱集合
+    bounced_emails = set(b['bounced_email'].lower() for b in bounce_list)
+    
+    # 添加投递状态列
+    df = send_results_df.copy()
+    
+    def get_delivery_status(row):
+        if row['status'] == 'Failed':
+            return '❌ 发送失败'
+        elif row['to_email'].lower() in bounced_emails:
+            return '📨 已退信'
+        else:
+            return '✅ 可能送达'
+    
+    df['delivery_status'] = df.apply(get_delivery_status, axis=1)
+    
+    return df
+
+def generate_archive_data(emails_list: list, send_results_df: pd.DataFrame, 
+                          bounce_list: list, send_date: str) -> pd.DataFrame:
+    """
+    Generate comprehensive archive data for analysis.
+    
+    Columns:
+    - 序号 (Serial Number)
+    - 发送日期 (Send Date)
+    - 发送公司名 (Company Name)
+    - 发送邮箱 (Sent To Email)
+    - 退信邮箱 (Bounced Email - if bounced)
+    - 正确触达邮箱 (Successfully Delivered Email)
+    - 邮件标题 (Email Subject)
+    - 邮件内容 (Email Body)
+    """
+    if emails_list is None or len(emails_list) == 0:
+        return pd.DataFrame()
+    
+    # 创建退信邮箱集合
+    bounced_emails_set = set(b['bounced_email'].lower() for b in bounce_list) if bounce_list else set()
+    
+    # 创建发送结果映射
+    send_status_map = {}
+    if send_results_df is not None and len(send_results_df) > 0:
+        for _, row in send_results_df.iterrows():
+            send_status_map[row['to_email'].lower()] = row['status']
+    
+    archive_records = []
+    
+    for idx, email_data in enumerate(emails_list, 1):
+        to_email = email_data.get('to_email', '')
+        to_email_lower = to_email.lower()
+        
+        # 判断发送状态
+        send_status = send_status_map.get(to_email_lower, 'Unknown')
+        
+        # 判断是否退信
+        is_bounced = to_email_lower in bounced_emails_set
+        
+        # 判断是否正确触达
+        is_delivered = (send_status == 'Success') and (not is_bounced)
+        
+        record = {
+            '序号': idx,
+            '发送日期': send_date,
+            '发送公司名': email_data.get('company', ''),
+            '发送邮箱': to_email,
+            '退信邮箱': to_email if is_bounced else '',
+            '正确触达邮箱': to_email if is_delivered else '',
+            '邮件标题': email_data.get('subject', ''),
+            '邮件内容': email_data.get('body', '').replace('\n', ' ')[:500] + '...' if len(email_data.get('body', '')) > 500 else email_data.get('body', '').replace('\n', ' ')
+        }
+        
+        archive_records.append(record)
+    
+    return pd.DataFrame(archive_records)
+
+# ============================================
 # SIDEBAR
 # ============================================
 with st.sidebar:
@@ -889,6 +1138,25 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # IMAP Settings for Bounce Monitoring
+    st.markdown("### 📬 退信监控设置 (IMAP)")
+    
+    imap_server = st.text_input(
+        "IMAP Server",
+        value="imap.mxhichina.com",
+        help="阿里云企业邮箱: imap.mxhichina.com"
+    )
+    
+    imap_port = st.number_input(
+        "IMAP Port",
+        value=993,
+        min_value=1,
+        max_value=65535,
+        help="SSL 端口通常为 993"
+    )
+    
+    st.markdown("---")
+    
     # Marketing Image Upload
     st.markdown("### 🖼️ Marketing Attachment")
     marketing_image = st.file_uploader(
@@ -918,15 +1186,17 @@ st.markdown('<h1 class="main-header">📧 AI Email Marketing System</h1>', unsaf
 st.markdown('<p class="sub-header">Upload → Extract → Research → Generate → Send</p>', unsafe_allow_html=True)
 
 # Progress indicator
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5, col6 = st.columns(6)
 steps = [
     ("1. Extract", st.session_state.companies is not None),
     ("2. Research", st.session_state.research_data is not None),
     ("3. Generate", st.session_state.emails is not None),
-    ("4. Send", st.session_state.send_results is not None)
+    ("4. Send", st.session_state.send_results is not None),
+    ("5. Monitor", st.session_state.delivery_tracking is not None),
+    ("6. Archive", st.session_state.archive_data is not None)
 ]
 
-for col, (step_name, completed) in zip([col1, col2, col3, col4], steps):
+for col, (step_name, completed) in zip([col1, col2, col3, col4, col5, col6], steps):
     with col:
         status = "✅" if completed else "⏳"
         st.markdown(f"<div class='metric-box'><span class='metric-value'>{status}</span><br><span class='metric-label'>{step_name}</span></div>", unsafe_allow_html=True)
@@ -1393,6 +1663,345 @@ if st.session_state.send_results is not None:
             "message": "Message"
         }
     )
+
+st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
+
+# ============================================
+# STEP 5: BOUNCE MONITORING
+# ============================================
+st.markdown("""
+<div class="step-card">
+    <div class="step-title">
+        <span class="step-number">5</span>
+        退信监控 & 有效邮箱记录
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div style="background: rgba(201, 162, 39, 0.1); padding: 12px; border-radius: 8px; margin-bottom: 15px; border: 1px solid rgba(201, 162, 39, 0.3);">
+    <span style="color: #C9A227;">💡 说明：</span>
+    <span style="color: #E8D5B7;">发送邮件后，退信通常需要几分钟到几小时才会返回到收件箱。建议发送后等待 1-24 小时再检测退信。</span>
+</div>
+""", unsafe_allow_html=True)
+
+if st.session_state.send_results is not None:
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        days_back = st.number_input(
+            "检测最近几天的退信",
+            min_value=1,
+            max_value=30,
+            value=7,
+            help="搜索过去 N 天内的退信邮件"
+        )
+    
+    with col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        check_bounce_btn = st.button("📬 检测退信", use_container_width=True)
+    
+    with col3:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.session_state.delivery_tracking is not None:
+            export_btn = st.button("📥 导出有效邮箱", use_container_width=True)
+        else:
+            export_btn = False
+    
+    if check_bounce_btn:
+        if not all([imap_server, sender_email, sender_password]):
+            st.error("⚠️ 请在侧边栏配置 IMAP 设置和邮箱密码")
+        else:
+            with st.spinner("🔍 正在检测退信邮件..."):
+                imap_settings = {
+                    'server': imap_server,
+                    'port': imap_port,
+                    'email': sender_email,
+                    'password': sender_password
+                }
+                
+                bounces, error = check_bounce_emails(imap_settings, days_back)
+                
+                if error:
+                    st.error(f"❌ 检测失败: {error}")
+                else:
+                    st.session_state.bounce_emails = bounces
+                    
+                    # 更新投递状态
+                    st.session_state.delivery_tracking = update_delivery_status(
+                        st.session_state.send_results, 
+                        bounces
+                    )
+                    
+                    # 筛选有效邮箱
+                    valid_emails = []
+                    for _, row in st.session_state.delivery_tracking.iterrows():
+                        if row['delivery_status'] == '✅ 可能送达':
+                            valid_emails.append({
+                                'company': row['company'],
+                                'email': row['to_email'],
+                                'email_type': row.get('email_type', '通用'),
+                                'send_date': datetime.now().strftime('%Y-%m-%d')
+                            })
+                    st.session_state.valid_emails = valid_emails
+                    
+                    st.success(f"✅ 检测完成！发现 {len(bounces)} 封退信")
+                    st.rerun()
+    
+    # 显示投递追踪结果
+    if st.session_state.delivery_tracking is not None:
+        st.markdown("### 📊 投递状态追踪")
+        
+        # 统计
+        tracking_df = st.session_state.delivery_tracking
+        delivered = len(tracking_df[tracking_df['delivery_status'] == '✅ 可能送达'])
+        bounced = len(tracking_df[tracking_df['delivery_status'] == '📨 已退信'])
+        failed = len(tracking_df[tracking_df['delivery_status'] == '❌ 发送失败'])
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.markdown(f"""
+            <div class="metric-box">
+                <span class="metric-value" style="color: #2D8B4E;">{delivered}</span>
+                <br><span class="metric-label">✅ 可能送达</span>
+            </div>
+            """, unsafe_allow_html=True)
+        with col2:
+            st.markdown(f"""
+            <div class="metric-box">
+                <span class="metric-value" style="color: #C9A227;">{bounced}</span>
+                <br><span class="metric-label">📨 已退信</span>
+            </div>
+            """, unsafe_allow_html=True)
+        with col3:
+            st.markdown(f"""
+            <div class="metric-box">
+                <span class="metric-value" style="color: #A83232;">{failed}</span>
+                <br><span class="metric-label">❌ 发送失败</span>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("")
+        
+        # 显示详细追踪表
+        st.dataframe(
+            tracking_df,
+            use_container_width=True,
+            column_config={
+                "company": "Company",
+                "to_email": "Email",
+                "email_type": st.column_config.TextColumn("类型", width="small"),
+                "status": st.column_config.TextColumn("发送状态", width="small"),
+                "delivery_status": st.column_config.TextColumn("投递状态", width="medium"),
+                "message": "备注"
+            }
+        )
+        
+        # 显示退信详情
+        if len(st.session_state.bounce_emails) > 0:
+            with st.expander(f"📨 退信详情 ({len(st.session_state.bounce_emails)} 封)", expanded=False):
+                bounce_df = pd.DataFrame(st.session_state.bounce_emails)
+                st.dataframe(
+                    bounce_df,
+                    use_container_width=True,
+                    column_config={
+                        "bounced_email": "退信邮箱",
+                        "bounce_subject": "退信主题",
+                        "bounce_date": "退信时间",
+                        "reason": "原因"
+                    }
+                )
+        
+        # 显示有效邮箱（可用于二次开发）
+        if len(st.session_state.valid_emails) > 0:
+            st.markdown("### ✅ 有效邮箱列表（可用于二次开发）")
+            valid_df = pd.DataFrame(st.session_state.valid_emails)
+            st.dataframe(
+                valid_df,
+                use_container_width=True,
+                column_config={
+                    "company": "Company",
+                    "email": "有效邮箱",
+                    "email_type": st.column_config.TextColumn("类型", width="small"),
+                    "send_date": "发送日期"
+                }
+            )
+            
+            # 导出功能
+            csv_data = valid_df.to_csv(index=False, encoding='utf-8-sig')
+            st.download_button(
+                label="📥 下载有效邮箱 CSV",
+                data=csv_data,
+                file_name=f"valid_emails_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+else:
+    st.info("📧 请先完成 Step 4 发送邮件后，再进行退信监控")
+
+st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
+
+# ============================================
+# STEP 6: ARCHIVE & EXPORT
+# ============================================
+st.markdown("""
+<div class="step-card">
+    <div class="step-title">
+        <span class="step-number">6</span>
+        数据归档 & 分析导出
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<div style="background: rgba(201, 162, 39, 0.1); padding: 12px; border-radius: 8px; margin-bottom: 15px; border: 1px solid rgba(201, 162, 39, 0.3);">
+    <span style="color: #C9A227;">📁 归档说明：</span>
+    <span style="color: #E8D5B7;">生成完整的邮件发送记录，包含公司名、邮箱、退信状态、触达状态、邮件内容等，便于后续分析和二次开发。</span>
+</div>
+""", unsafe_allow_html=True)
+
+if st.session_state.emails is not None and st.session_state.send_results is not None:
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        archive_date = st.date_input(
+            "发送日期",
+            value=datetime.now(),
+            help="归档记录的发送日期"
+        )
+    
+    with col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        generate_archive_btn = st.button("📁 生成归档数据", use_container_width=True)
+    
+    if generate_archive_btn:
+        with st.spinner("正在生成归档数据..."):
+            # 生成归档数据
+            archive_df = generate_archive_data(
+                emails_list=st.session_state.emails,
+                send_results_df=st.session_state.send_results,
+                bounce_list=st.session_state.bounce_emails,
+                send_date=archive_date.strftime('%Y-%m-%d')
+            )
+            st.session_state.archive_data = archive_df
+            st.success(f"✅ 归档数据生成成功！共 {len(archive_df)} 条记录")
+            st.rerun()
+    
+    # 显示归档数据
+    if st.session_state.archive_data is not None and len(st.session_state.archive_data) > 0:
+        st.markdown("### 📊 归档数据预览")
+        
+        archive_df = st.session_state.archive_data
+        
+        # 统计信息
+        total_sent = len(archive_df)
+        total_bounced = len(archive_df[archive_df['退信邮箱'] != ''])
+        total_delivered = len(archive_df[archive_df['正确触达邮箱'] != ''])
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.markdown(f"""
+            <div class="metric-box">
+                <span class="metric-value">{total_sent}</span>
+                <br><span class="metric-label">📧 总发送</span>
+            </div>
+            """, unsafe_allow_html=True)
+        with col2:
+            st.markdown(f"""
+            <div class="metric-box">
+                <span class="metric-value" style="color: #2D8B4E;">{total_delivered}</span>
+                <br><span class="metric-label">✅ 正确触达</span>
+            </div>
+            """, unsafe_allow_html=True)
+        with col3:
+            st.markdown(f"""
+            <div class="metric-box">
+                <span class="metric-value" style="color: #A83232;">{total_bounced}</span>
+                <br><span class="metric-label">📨 退信</span>
+            </div>
+            """, unsafe_allow_html=True)
+        with col4:
+            delivery_rate = (total_delivered / total_sent * 100) if total_sent > 0 else 0
+            st.markdown(f"""
+            <div class="metric-box">
+                <span class="metric-value" style="color: #C9A227;">{delivery_rate:.1f}%</span>
+                <br><span class="metric-label">📈 触达率</span>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("")
+        
+        # 显示归档表格
+        st.dataframe(
+            archive_df,
+            use_container_width=True,
+            column_config={
+                "序号": st.column_config.NumberColumn("序号", width="small"),
+                "发送日期": st.column_config.TextColumn("发送日期", width="small"),
+                "发送公司名": st.column_config.TextColumn("公司名", width="medium"),
+                "发送邮箱": st.column_config.TextColumn("发送邮箱", width="medium"),
+                "退信邮箱": st.column_config.TextColumn("退信邮箱", width="medium"),
+                "正确触达邮箱": st.column_config.TextColumn("正确触达", width="medium"),
+                "邮件标题": st.column_config.TextColumn("邮件标题", width="large"),
+                "邮件内容": st.column_config.TextColumn("邮件内容", width="large")
+            },
+            height=400
+        )
+        
+        st.markdown("### 📥 导出归档数据")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # CSV 导出
+            csv_data = archive_df.to_csv(index=False, encoding='utf-8-sig')
+            st.download_button(
+                label="📥 下载 CSV 文件",
+                data=csv_data,
+                file_name=f"email_archive_{archive_date.strftime('%Y%m%d')}_{datetime.now().strftime('%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        with col2:
+            # Excel 导出 (使用 CSV 格式，Excel 可打开)
+            # 创建仅包含正确触达邮箱的版本
+            delivered_only = archive_df[archive_df['正确触达邮箱'] != ''][['序号', '发送日期', '发送公司名', '正确触达邮箱', '邮件标题']]
+            if len(delivered_only) > 0:
+                delivered_csv = delivered_only.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    label="📥 仅下载有效触达邮箱",
+                    data=delivered_csv,
+                    file_name=f"delivered_emails_{archive_date.strftime('%Y%m%d')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            else:
+                st.info("暂无有效触达邮箱数据")
+        
+        # 显示详细邮件内容（可展开）
+        with st.expander("📧 查看完整邮件内容", expanded=False):
+            for _, row in archive_df.iterrows():
+                status_icon = "✅" if row['正确触达邮箱'] else ("📨" if row['退信邮箱'] else "❓")
+                st.markdown(f"""
+                <div style="background: rgba(26, 37, 64, 0.5); padding: 15px; border-radius: 8px; margin-bottom: 10px; border-left: 3px solid {'#2D8B4E' if row['正确触达邮箱'] else '#A83232' if row['退信邮箱'] else '#C9A227'};">
+                    <div style="color: #C9A227; font-weight: bold; margin-bottom: 5px;">
+                        {status_icon} #{row['序号']} - {row['发送公司名']}
+                    </div>
+                    <div style="color: #E8D5B7; font-size: 0.9rem; margin-bottom: 5px;">
+                        📧 To: {row['发送邮箱']}
+                    </div>
+                    <div style="color: #E8D5B7; font-size: 0.9rem; margin-bottom: 10px;">
+                        📌 {row['邮件标题']}
+                    </div>
+                    <div style="color: #FAF8F5; font-size: 0.85rem; background: rgba(10, 15, 26, 0.5); padding: 10px; border-radius: 5px; white-space: pre-wrap;">
+                        {row['邮件内容'][:300]}...
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+else:
+    st.info("📧 请先完成 Step 3 生成邮件和 Step 4 发送邮件后，再进行归档")
 
 # Footer
 st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
