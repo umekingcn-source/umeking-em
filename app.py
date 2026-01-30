@@ -20,6 +20,8 @@ from email.mime.image import MIMEImage
 from datetime import datetime, timedelta
 import time
 import random
+import threading
+from zoneinfo import ZoneInfo
 import google.generativeai as genai
 from io import BytesIO
 from PIL import Image
@@ -498,10 +500,86 @@ if 'valid_emails' not in st.session_state:
 # 归档数据
 if 'archive_data' not in st.session_state:
     st.session_state.archive_data = None  # 完整归档记录
+# 定时发送相关
+if 'scheduled_send' not in st.session_state:
+    st.session_state.scheduled_send = None  # 定时发送信息
+if 'send_mode' not in st.session_state:
+    st.session_state.send_mode = "immediate"  # 发送模式: immediate / scheduled
+
+# ============================================
+# TIMEZONE CONSTANTS
+# ============================================
+COMMON_TIMEZONES = {
+    "🇺🇸 美国东部 (EST/EDT)": "America/New_York",
+    "🇺🇸 美国太平洋 (PST/PDT)": "America/Los_Angeles",
+    "🇺🇸 美国中部 (CST/CDT)": "America/Chicago",
+    "🇬🇧 英国 (GMT/BST)": "Europe/London",
+    "🇩🇪 德国/中欧 (CET/CEST)": "Europe/Berlin",
+    "🇫🇷 法国 (CET/CEST)": "Europe/Paris",
+    "🇦🇺 澳大利亚悉尼 (AEST/AEDT)": "Australia/Sydney",
+    "🇯🇵 日本 (JST)": "Asia/Tokyo",
+    "🇰🇷 韩国 (KST)": "Asia/Seoul",
+    "🇸🇬 新加坡 (SGT)": "Asia/Singapore",
+    "🇭🇰 香港 (HKT)": "Asia/Hong_Kong",
+    "🇨🇳 中国 (CST)": "Asia/Shanghai",
+    "🇮🇳 印度 (IST)": "Asia/Kolkata",
+    "🇦🇪 迪拜 (GST)": "Asia/Dubai",
+    "🇧🇷 巴西圣保罗 (BRT)": "America/Sao_Paulo",
+    "🇨🇦 加拿大多伦多 (EST/EDT)": "America/Toronto",
+    "🇲🇽 墨西哥城 (CST/CDT)": "America/Mexico_City",
+}
 
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
+
+def get_current_time_in_timezone(tz_name: str) -> datetime:
+    """Get current time in specified timezone."""
+    tz = ZoneInfo(tz_name)
+    return datetime.now(tz)
+
+def calculate_wait_seconds(target_tz: str, target_hour: int, target_minute: int) -> tuple:
+    """
+    Calculate seconds to wait until target time in target timezone.
+    Returns: (wait_seconds, target_datetime_local, target_datetime_target_tz)
+    """
+    # 获取目标时区的当前时间
+    target_tz_obj = ZoneInfo(target_tz)
+    now_target = datetime.now(target_tz_obj)
+    
+    # 构建目标时间（在目标时区）
+    target_time = now_target.replace(
+        hour=target_hour,
+        minute=target_minute,
+        second=0,
+        microsecond=0
+    )
+    
+    # 如果目标时间已过，设置为明天
+    if target_time <= now_target:
+        target_time = target_time + timedelta(days=1)
+    
+    # 计算等待时间
+    wait_seconds = (target_time - now_target).total_seconds()
+    
+    # 转换到本地时间显示
+    local_tz = ZoneInfo('Asia/Shanghai')  # 发送者所在时区（中国）
+    target_time_local = target_time.astimezone(local_tz)
+    
+    return wait_seconds, target_time_local, target_time
+
+def format_wait_time(seconds: float) -> str:
+    """Format wait time in human readable format."""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    
+    if hours > 0:
+        return f"{hours}小时 {minutes}分钟 {secs}秒"
+    elif minutes > 0:
+        return f"{minutes}分钟 {secs}秒"
+    else:
+        return f"{secs}秒"
 
 def encode_image_to_base64(image_file):
     """Encode uploaded image to base64 string."""
@@ -1512,6 +1590,90 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 if st.session_state.emails is not None:
+    # ============================================
+    # SCHEDULED SEND OPTIONS
+    # ============================================
+    st.markdown("### ⏰ 发送设置")
+    
+    send_mode = st.radio(
+        "选择发送模式",
+        options=["immediate", "scheduled"],
+        format_func=lambda x: "📤 立即发送" if x == "immediate" else "⏰ 定时发送（适用于时差场景）",
+        horizontal=True,
+        key="send_mode_radio"
+    )
+    st.session_state.send_mode = send_mode
+    
+    scheduled_info = None
+    
+    if send_mode == "scheduled":
+        st.markdown("""
+        <div style="background: rgba(201, 162, 39, 0.1); padding: 12px; border-radius: 8px; margin: 15px 0; border: 1px solid rgba(201, 162, 39, 0.3);">
+            <span style="color: #C9A227;">💡 定时发送说明：</span>
+            <span style="color: #E8D5B7;">选择目标客户所在时区和期望的发送时间，系统会自动计算并在合适的时间发送邮件，确保邮件在客户的工作时间送达。</span>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        col_tz, col_time = st.columns(2)
+        
+        with col_tz:
+            selected_tz_name = st.selectbox(
+                "🌍 目标客户时区",
+                options=list(COMMON_TIMEZONES.keys()),
+                index=0,
+                help="选择您目标客户所在的时区"
+            )
+            target_tz = COMMON_TIMEZONES[selected_tz_name]
+            
+            # 显示目标时区当前时间
+            current_target_time = get_current_time_in_timezone(target_tz)
+            st.info(f"📍 {selected_tz_name} 当前时间: **{current_target_time.strftime('%Y-%m-%d %H:%M:%S')}**")
+        
+        with col_time:
+            st.markdown("**⏰ 期望发送时间（目标时区）**")
+            time_col1, time_col2 = st.columns(2)
+            with time_col1:
+                target_hour = st.number_input(
+                    "小时 (0-23)",
+                    min_value=0,
+                    max_value=23,
+                    value=9,  # 默认早上9点
+                    help="建议: 工作日 9:00-11:00 或 14:00-16:00"
+                )
+            with time_col2:
+                target_minute = st.number_input(
+                    "分钟 (0-59)",
+                    min_value=0,
+                    max_value=59,
+                    value=0,
+                    step=5
+                )
+            
+            # 计算等待时间
+            wait_seconds, target_local, target_target_tz = calculate_wait_seconds(
+                target_tz, target_hour, target_minute
+            )
+            
+            # 显示发送计划
+            st.success(f"""
+            📅 **发送计划:**
+            - 目标时区发送时间: **{target_target_tz.strftime('%Y-%m-%d %H:%M')}**
+            - 中国时间: **{target_local.strftime('%Y-%m-%d %H:%M')}**
+            - 等待时间: **{format_wait_time(wait_seconds)}**
+            """)
+            
+            scheduled_info = {
+                'target_tz': target_tz,
+                'target_tz_name': selected_tz_name,
+                'target_hour': target_hour,
+                'target_minute': target_minute,
+                'wait_seconds': wait_seconds,
+                'target_time_local': target_local,
+                'target_time_target_tz': target_target_tz
+            }
+    
+    st.markdown("---")
+    
     # Pre-send checklist
     col1, col2, col3 = st.columns(3)
     
@@ -1543,13 +1705,67 @@ if st.session_state.emails is not None:
     
     st.markdown("")
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        if st.button("📤 SEND ALL EMAILS", use_container_width=True, type="primary"):
+        # 根据发送模式显示不同的按钮
+        if send_mode == "immediate":
+            send_btn_label = "📤 立即发送所有邮件"
+        else:
+            send_btn_label = f"⏰ 定时发送 ({format_wait_time(scheduled_info['wait_seconds']) if scheduled_info else ''})"
+        
+        if st.button(send_btn_label, use_container_width=True, type="primary"):
             if not all([smtp_server, sender_email, sender_password]):
                 st.error("⚠️ Please configure all email settings in the sidebar.")
             else:
+                # 如果是定时发送，先等待
+                if send_mode == "scheduled" and scheduled_info:
+                    wait_seconds = scheduled_info['wait_seconds']
+                    target_time_str = scheduled_info['target_time_target_tz'].strftime('%Y-%m-%d %H:%M')
+                    local_time_str = scheduled_info['target_time_local'].strftime('%Y-%m-%d %H:%M')
+                    
+                    st.info(f"""
+                    ⏰ **定时发送已启动**
+                    - 目标时间: {target_time_str} ({scheduled_info['target_tz_name']})
+                    - 中国时间: {local_time_str}
+                    - 等待时间: {format_wait_time(wait_seconds)}
+                    
+                    ⚠️ **请保持此页面打开，不要关闭浏览器**
+                    """)
+                    
+                    # 倒计时显示
+                    countdown_placeholder = st.empty()
+                    progress_placeholder = st.empty()
+                    
+                    # 倒计时等待
+                    remaining = wait_seconds
+                    start_time = time.time()
+                    
+                    while remaining > 0:
+                        elapsed = time.time() - start_time
+                        remaining = max(0, wait_seconds - elapsed)
+                        
+                        # 更新进度条
+                        progress = 1 - (remaining / wait_seconds) if wait_seconds > 0 else 1
+                        progress_placeholder.progress(progress)
+                        
+                        # 更新倒计时显示
+                        countdown_placeholder.markdown(f"""
+                        <div style="background: rgba(201, 162, 39, 0.15); padding: 20px; border-radius: 10px; text-align: center; border: 1px solid rgba(201, 162, 39, 0.4);">
+                            <div style="color: #C9A227; font-size: 1.5rem; font-weight: bold;">⏳ 距离发送还有</div>
+                            <div style="color: #FAF8F5; font-size: 2.5rem; font-weight: bold; margin: 15px 0;">{format_wait_time(remaining)}</div>
+                            <div style="color: #E8D5B7; font-size: 0.9rem;">目标时间: {target_time_str}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        # 每秒更新一次
+                        time.sleep(1)
+                    
+                    countdown_placeholder.empty()
+                    progress_placeholder.empty()
+                    st.success("⏰ 定时时间已到，开始发送邮件...")
+                
+                # 开始发送邮件
                 send_results = []
                 progress_bar = st.progress(0)
                 status_text = st.empty()
@@ -1591,16 +1807,27 @@ if st.session_state.emails is not None:
                         'to_email': email['to_email'],
                         'email_type': email.get('email_type', '通用'),
                         'status': 'Success' if success else 'Failed',
-                        'message': message
+                        'message': message,
+                        'send_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     })
                 
                 st.session_state.send_results = pd.DataFrame(send_results)
+                
+                # 保存定时发送信息
+                if send_mode == "scheduled" and scheduled_info:
+                    st.session_state.scheduled_send = {
+                        'target_tz': scheduled_info['target_tz_name'],
+                        'target_time': scheduled_info['target_time_target_tz'].strftime('%Y-%m-%d %H:%M'),
+                        'local_time': scheduled_info['target_time_local'].strftime('%Y-%m-%d %H:%M'),
+                        'actual_send_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    }
+                
                 status_text.empty()
                 progress_bar.empty()
                 st.rerun()
     
     with col2:
-        if st.button("🧪 Send Test Email (First Only)", use_container_width=True):
+        if st.button("🧪 测试发送（仅第一封）", use_container_width=True):
             if not all([smtp_server, sender_email, sender_password]):
                 st.error("⚠️ Please configure all email settings in the sidebar.")
             elif len(st.session_state.emails) > 0:
@@ -1633,10 +1860,49 @@ if st.session_state.emails is not None:
                     st.success(f"✅ Test email sent to {email['to_email']}")
                 else:
                     st.error(f"❌ Failed: {message}")
+    
+    with col3:
+        # 显示定时发送提示
+        if send_mode == "scheduled":
+            st.markdown("""
+            <div style="background: rgba(45, 139, 78, 0.15); padding: 12px; border-radius: 8px; border: 1px solid rgba(45, 139, 78, 0.3);">
+                <div style="color: #2D8B4E; font-weight: bold; font-size: 0.9rem;">💡 定时发送提示</div>
+                <div style="color: #E8D5B7; font-size: 0.8rem; margin-top: 8px;">
+                    • 最佳发送时间：工作日 9-11 AM<br>
+                    • 页面需保持打开状态<br>
+                    • 可随时刷新页面取消
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div style="background: rgba(201, 162, 39, 0.1); padding: 12px; border-radius: 8px; border: 1px solid rgba(201, 162, 39, 0.3);">
+                <div style="color: #C9A227; font-weight: bold; font-size: 0.9rem;">📧 发送提示</div>
+                <div style="color: #E8D5B7; font-size: 0.8rem; margin-top: 8px;">
+                    • 每封邮件间隔 5-10 秒<br>
+                    • 避免触发垃圾邮件过滤<br>
+                    • 建议先测试发送
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
 # Show send results
 if st.session_state.send_results is not None:
     st.markdown("### 📊 Send Report")
+    
+    # 显示定时发送信息
+    if st.session_state.scheduled_send is not None:
+        sched = st.session_state.scheduled_send
+        st.markdown(f"""
+        <div style="background: rgba(45, 139, 78, 0.15); padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid rgba(45, 139, 78, 0.3);">
+            <div style="color: #2D8B4E; font-weight: bold; margin-bottom: 8px;">⏰ 定时发送完成</div>
+            <div style="color: #E8D5B7; font-size: 0.9rem;">
+                • 目标时区: {sched.get('target_tz', 'N/A')}<br>
+                • 计划发送时间: {sched.get('target_time', 'N/A')}<br>
+                • 实际发送时间: {sched.get('actual_send_time', 'N/A')}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
     
     # Summary metrics
     success_count = len(st.session_state.send_results[st.session_state.send_results['status'] == 'Success'])
