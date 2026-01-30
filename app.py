@@ -1875,13 +1875,15 @@ if st.session_state.emails is not None:
                 fail_count = 0
                 
                 for i, email in enumerate(st.session_state.emails):
-                    # 发送延迟：模拟真人操作，避免被邮件服务商封号
+                    # 发送延迟：每封邮件间隔1分钟，避免被邮件服务商封号
                     if i > 0:
-                        delay = random.uniform(5, 10)  # 随机 5-10 秒延迟
-                        for countdown in range(int(delay), 0, -1):
+                        delay = 60  # 固定1分钟间隔
+                        for countdown in range(delay, 0, -1):
+                            mins = countdown // 60
+                            secs = countdown % 60
                             status_text.markdown(f"""
                             <div style="color: #C9A227; font-size: 0.9rem;">
-                                ⏳ 等待 {countdown} 秒后发送下一封（避免触发垃圾邮件过滤）...
+                                ⏳ 等待 {mins}分{secs:02d}秒 后发送下一封（避免触发垃圾邮件过滤）...
                             </div>
                             """, unsafe_allow_html=True)
                             time.sleep(1)
