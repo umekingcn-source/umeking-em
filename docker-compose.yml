@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  email-marketing:
+    build: .
+    container_name: ai-email-marketing
+    ports:
+      - "8501:8501"
+    volumes:
+      # 持久化发送历史记录
+      - ./send_history:/app/send_history
+      # 如果需要使用 secrets，取消下面一行的注释
+      # - ./.streamlit/secrets.toml:/app/.streamlit/secrets.toml:ro
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+

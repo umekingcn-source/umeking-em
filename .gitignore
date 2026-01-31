@@ -1,31 +1,67 @@
-# Byte-compiled / optimized / DLL files
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# Virtual environment
+# Virtual Environment
 venv/
+ENV/
 env/
-.env
+.venv/
 
 # IDE
 .idea/
 .vscode/
 *.swp
 *.swo
+*~
 
 # Streamlit
 .streamlit/secrets.toml
 
-# Temp files
+# 敏感数据
+*.log
+*.csv
+*.xlsx
+
+# 发送历史记录（包含敏感邮件信息）
+send_history/
+
+# 临时文件
 *.tmp
 *.temp
 
-# OS files
+# 操作系统
 .DS_Store
 Thumbs.db
+desktop.ini
 
-# Screenshots (optional - remove if you want to include)
-# *.png
-# *.jpg
+# 截图和图片
+*.png
+*.jpg
+*.jpeg
+*.gif
+!logo.png
+!favicon.png
 
+# 环境变量
+.env
+.env.local
+.env.*.local

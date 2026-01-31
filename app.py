@@ -478,6 +478,133 @@ section[data-testid="stSidebar"] span {
 """, unsafe_allow_html=True)
 
 # ============================================
+# PERSISTENT STORAGE - 历史记录持久化存储
+# ============================================
+import os
+
+HISTORY_DIR = "send_history"  # 历史记录存储目录
+
+def ensure_history_dir():
+    """确保历史记录目录存在"""
+    if not os.path.exists(HISTORY_DIR):
+        os.makedirs(HISTORY_DIR)
+
+def save_send_history(emails_list, send_results_df, scheduled_send=None, bounce_emails=None):
+    """
+    保存发送记录到本地文件
+    文件名格式: send_YYYYMMDD_HHMMSS.json
+    """
+    ensure_history_dir()
+    
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    filename = f"send_{timestamp}.json"
+    filepath = os.path.join(HISTORY_DIR, filename)
+    
+    # 准备保存的数据
+    history_data = {
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'emails': emails_list if emails_list else [],
+        'send_results': send_results_df.to_dict('records') if send_results_df is not None else [],
+        'scheduled_send': scheduled_send,
+        'bounce_emails': bounce_emails if bounce_emails else [],
+        'summary': {
+            'total': len(emails_list) if emails_list else 0,
+            'success': len(send_results_df[send_results_df['status'] == 'Success']) if send_results_df is not None and len(send_results_df) > 0 else 0,
+            'failed': len(send_results_df[send_results_df['status'] == 'Failed']) if send_results_df is not None and len(send_results_df) > 0 else 0
+        }
+    }
+    
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(history_data, f, ensure_ascii=False, indent=2, default=str)
+        return filepath, None
+    except Exception as e:
+        return None, str(e)
+
+def update_send_history_bounces(filepath, bounce_emails, delivery_tracking_df=None):
+    """更新历史记录中的退信信息"""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        data['bounce_emails'] = bounce_emails
+        data['bounce_check_time'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        if delivery_tracking_df is not None:
+            data['delivery_tracking'] = delivery_tracking_df.to_dict('records')
+        
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+def get_history_list():
+    """获取所有历史记录列表"""
+    ensure_history_dir()
+    history_files = []
+    
+    try:
+        for filename in os.listdir(HISTORY_DIR):
+            if filename.startswith('send_') and filename.endswith('.json'):
+                filepath = os.path.join(HISTORY_DIR, filename)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    summary = data.get('summary', {})
+                    scheduled = data.get('scheduled_send', {})
+                    bounce_count = len(data.get('bounce_emails', []))
+                    
+                    history_files.append({
+                        'filename': filename,
+                        'filepath': filepath,
+                        'timestamp': data.get('timestamp', 'Unknown'),
+                        'total': summary.get('total', 0),
+                        'success': summary.get('success', 0),
+                        'failed': summary.get('failed', 0),
+                        'bounces': bounce_count,
+                        'scheduled_tz': scheduled.get('target_tz', '') if scheduled else '',
+                        'display': f"📧 {data.get('timestamp', 'Unknown')} - 发送 {summary.get('total', 0)} 封 (成功 {summary.get('success', 0)} / 失败 {summary.get('failed', 0)} / 退信 {bounce_count})"
+                    })
+                except:
+                    continue
+        
+        # 按时间倒序排列
+        history_files.sort(key=lambda x: x['timestamp'], reverse=True)
+        return history_files
+    except:
+        return []
+
+def load_send_history(filepath):
+    """加载指定的历史记录"""
+    try:
+        with open(filepath, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        # 转换 send_results 为 DataFrame
+        send_results_df = None
+        if data.get('send_results'):
+            send_results_df = pd.DataFrame(data['send_results'])
+        
+        # 转换 delivery_tracking 为 DataFrame
+        delivery_tracking_df = None
+        if data.get('delivery_tracking'):
+            delivery_tracking_df = pd.DataFrame(data['delivery_tracking'])
+        
+        return {
+            'emails': data.get('emails', []),
+            'send_results': send_results_df,
+            'scheduled_send': data.get('scheduled_send'),
+            'bounce_emails': data.get('bounce_emails', []),
+            'delivery_tracking': delivery_tracking_df,
+            'timestamp': data.get('timestamp'),
+            'filepath': filepath
+        }, None
+    except Exception as e:
+        return None, str(e)
+
+# ============================================
 # INITIALIZE SESSION STATE
 # ============================================
 if 'companies' not in st.session_state:
@@ -505,6 +632,9 @@ if 'scheduled_send' not in st.session_state:
     st.session_state.scheduled_send = None  # 定时发送信息
 if 'send_mode' not in st.session_state:
     st.session_state.send_mode = "immediate"  # 发送模式: immediate / scheduled
+# 历史记录相关
+if 'current_history_file' not in st.session_state:
+    st.session_state.current_history_file = None  # 当前加载的历史记录文件路径
 
 # ============================================
 # TIMEZONE CONSTANTS
@@ -976,6 +1106,33 @@ def extract_bounced_email(email_body: str) -> list:
     
     return bounced_emails
 
+def safe_imap_close(mail):
+    """安全关闭 IMAP 连接，避免 socket EOF 错误"""
+    if mail is None:
+        return
+    try:
+        # 先尝试关闭当前选中的邮箱
+        try:
+            mail.close()
+        except:
+            pass
+        # 再尝试 logout
+        try:
+            mail.logout()
+        except:
+            pass
+    except:
+        pass
+    finally:
+        # 如果上面都失败了，尝试直接关闭 socket
+        try:
+            if hasattr(mail, 'socket') and mail.socket:
+                mail.socket.close()
+            elif hasattr(mail, 'sock') and mail.sock:
+                mail.sock.close()
+        except:
+            pass
+
 def check_bounce_emails(imap_settings: dict, days_back: int = 7) -> tuple:
     """
     Check inbox for bounce notifications.
@@ -984,6 +1141,8 @@ def check_bounce_emails(imap_settings: dict, days_back: int = 7) -> tuple:
     mail, error = connect_imap(imap_settings)
     if error:
         return [], f"IMAP connection failed: {error}"
+    
+    all_bounces = []
     
     try:
         # 选择收件箱
@@ -1012,7 +1171,6 @@ def check_bounce_emails(imap_settings: dict, days_back: int = 7) -> tuple:
             'Returned to sender'
         ]
         
-        all_bounces = []
         processed_ids = set()
         
         # 搜索包含退信关键词的邮件
@@ -1070,14 +1228,13 @@ def check_bounce_emails(imap_settings: dict, days_back: int = 7) -> tuple:
             except Exception as e:
                 continue
         
-        mail.logout()
+        # 安全关闭连接
+        safe_imap_close(mail)
         return all_bounces, None
         
     except Exception as e:
-        try:
-            mail.logout()
-        except:
-            pass
+        # 安全关闭连接
+        safe_imap_close(mail)
         return [], f"Error checking bounces: {str(e)}"
 
 def update_delivery_status(send_results_df: pd.DataFrame, bounce_list: list) -> pd.DataFrame:
@@ -1610,57 +1767,173 @@ if st.session_state.emails is not None:
         st.markdown("""
         <div style="background: rgba(201, 162, 39, 0.1); padding: 12px; border-radius: 8px; margin: 15px 0; border: 1px solid rgba(201, 162, 39, 0.3);">
             <span style="color: #C9A227;">💡 定时发送说明：</span>
-            <span style="color: #E8D5B7;">选择目标客户所在时区和期望的发送时间，系统会自动计算并在合适的时间发送邮件，确保邮件在客户的工作时间送达。</span>
+            <span style="color: #E8D5B7;">选择发送时间，系统会自动计算并在指定时间发送邮件。⚠️ 请保持页面打开直到发送完成。</span>
         </div>
         """, unsafe_allow_html=True)
         
-        col_tz, col_time = st.columns(2)
+        # 快速选择模式 vs 精确时间模式
+        schedule_type = st.radio(
+            "选择定时方式",
+            options=["quick", "precise"],
+            format_func=lambda x: "⚡ 快速选择（测试推荐）" if x == "quick" else "🎯 精确时间（跨时区推荐）",
+            horizontal=True,
+            key="schedule_type_radio"
+        )
         
-        with col_tz:
-            selected_tz_name = st.selectbox(
-                "🌍 目标客户时区",
-                options=list(COMMON_TIMEZONES.keys()),
-                index=0,
-                help="选择您目标客户所在的时区"
-            )
-            target_tz = COMMON_TIMEZONES[selected_tz_name]
+        if schedule_type == "quick":
+            # 快速选择模式 - 方便测试
+            st.markdown("""
+            <div style="background: rgba(45, 139, 78, 0.1); padding: 10px; border-radius: 8px; margin: 10px 0; border: 1px solid rgba(45, 139, 78, 0.3);">
+                <span style="color: #2D8B4E;">🚀 快速模式：</span>
+                <span style="color: #E8D5B7;">选择几分钟或几小时后发送，非常适合测试定时功能！</span>
+            </div>
+            """, unsafe_allow_html=True)
             
-            # 显示目标时区当前时间
-            current_target_time = get_current_time_in_timezone(target_tz)
-            st.info(f"📍 {selected_tz_name} 当前时间: **{current_target_time.strftime('%Y-%m-%d %H:%M:%S')}**")
+            col_quick1, col_quick2 = st.columns(2)
+            
+            with col_quick1:
+                quick_options = {
+                    "1分钟后（测试用）": 1,
+                    "2分钟后（测试用）": 2,
+                    "5分钟后": 5,
+                    "10分钟后": 10,
+                    "15分钟后": 15,
+                    "30分钟后": 30,
+                    "45分钟后": 45,
+                    "1小时后": 60,
+                }
+                selected_quick = st.selectbox(
+                    "⏱️ 选择发送时间",
+                    options=list(quick_options.keys()),
+                    index=0,
+                    help="选择几分钟/小时后发送"
+                )
+                wait_minutes = quick_options[selected_quick]
+                wait_seconds = wait_minutes * 60
+            
+            with col_quick2:
+                # 显示发送时间预览
+                local_tz = ZoneInfo('Asia/Shanghai')
+                now_local = datetime.now(local_tz)
+                target_time_local = now_local + timedelta(minutes=wait_minutes)
+                
+                st.markdown(f"""
+                <div style="background: rgba(26, 37, 64, 0.6); padding: 15px; border-radius: 10px; margin-top: 5px;">
+                    <div style="color: #C9A227; font-weight: bold; font-size: 1.1rem; margin-bottom: 8px;">
+                        📅 发送计划
+                    </div>
+                    <div style="color: #FAF8F5; font-size: 0.95rem; line-height: 1.8;">
+                        🕐 当前时间: <b>{now_local.strftime('%H:%M:%S')}</b><br>
+                        🎯 发送时间: <b style="color: #2D8B4E;">{target_time_local.strftime('%H:%M:%S')}</b><br>
+                        ⏳ 等待时间: <b style="color: #C9A227;">{format_wait_time(wait_seconds)}</b>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            scheduled_info = {
+                'target_tz': 'Asia/Shanghai',
+                'target_tz_name': '🇨🇳 中国 (CST)',
+                'target_hour': target_time_local.hour,
+                'target_minute': target_time_local.minute,
+                'wait_seconds': wait_seconds,
+                'target_time_local': target_time_local,
+                'target_time_target_tz': target_time_local,
+                'quick_mode': True
+            }
         
-        with col_time:
-            st.markdown("**⏰ 期望发送时间（目标时区）**")
-            time_col1, time_col2 = st.columns(2)
-            with time_col1:
-                target_hour = st.number_input(
-                    "小时 (0-23)",
-                    min_value=0,
-                    max_value=23,
-                    value=9,  # 默认早上9点
-                    help="建议: 工作日 9:00-11:00 或 14:00-16:00"
-                )
-            with time_col2:
-                target_minute = st.number_input(
-                    "分钟 (0-59)",
-                    min_value=0,
-                    max_value=59,
-                    value=0,
-                    step=5
-                )
+        else:
+            # 精确时间模式 - 跨时区
+            col_tz, col_time = st.columns(2)
             
-            # 计算等待时间
-            wait_seconds, target_local, target_target_tz = calculate_wait_seconds(
-                target_tz, target_hour, target_minute
-            )
+            with col_tz:
+                selected_tz_name = st.selectbox(
+                    "🌍 目标客户时区",
+                    options=list(COMMON_TIMEZONES.keys()),
+                    index=0,
+                    help="选择您目标客户所在的时区"
+                )
+                target_tz = COMMON_TIMEZONES[selected_tz_name]
+                
+                # 显示目标时区当前时间
+                current_target_time = get_current_time_in_timezone(target_tz)
+                st.markdown(f"""
+                <div style="background: rgba(26, 37, 64, 0.6); padding: 12px; border-radius: 8px; margin-top: 10px;">
+                    <div style="color: #E8D5B7; font-size: 0.9rem;">
+                        📍 {selected_tz_name}<br>
+                        当前时间: <b style="color: #C9A227;">{current_target_time.strftime('%Y-%m-%d %H:%M:%S')}</b>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
             
-            # 显示发送计划
-            st.success(f"""
-            📅 **发送计划:**
-            - 目标时区发送时间: **{target_target_tz.strftime('%Y-%m-%d %H:%M')}**
-            - 中国时间: **{target_local.strftime('%Y-%m-%d %H:%M')}**
-            - 等待时间: **{format_wait_time(wait_seconds)}**
-            """)
+            with col_time:
+                st.markdown("**⏰ 期望发送时间（目标时区）**")
+                
+                # 推荐时间快速选择
+                time_presets = {
+                    "自定义时间": None,
+                    "上午 9:00（推荐）": (9, 0),
+                    "上午 10:00": (10, 0),
+                    "上午 11:00": (11, 0),
+                    "下午 2:00（推荐）": (14, 0),
+                    "下午 3:00": (15, 0),
+                    "下午 4:00": (16, 0),
+                }
+                
+                preset_choice = st.selectbox(
+                    "快速选择",
+                    options=list(time_presets.keys()),
+                    index=1,
+                    help="选择常用的最佳发送时间"
+                )
+                
+                if time_presets[preset_choice] is None:
+                    time_col1, time_col2 = st.columns(2)
+                    with time_col1:
+                        target_hour = st.number_input(
+                            "小时 (0-23)",
+                            min_value=0,
+                            max_value=23,
+                            value=9,
+                            help="建议: 工作日 9:00-11:00 或 14:00-16:00"
+                        )
+                    with time_col2:
+                        target_minute = st.number_input(
+                            "分钟 (0-59)",
+                            min_value=0,
+                            max_value=59,
+                            value=0,
+                            step=5
+                        )
+                else:
+                    target_hour, target_minute = time_presets[preset_choice]
+                    st.info(f"已选择: {target_hour:02d}:{target_minute:02d}")
+                
+                # 计算等待时间
+                wait_seconds, target_local, target_target_tz = calculate_wait_seconds(
+                    target_tz, target_hour, target_minute
+                )
+                
+                # 检查是否推迟到明天
+                now_target = get_current_time_in_timezone(target_tz)
+                is_tomorrow = target_target_tz.date() > now_target.date()
+                
+                # 显示发送计划
+                tomorrow_badge = '<span style="background: #A83232; color: #fff; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; margin-left: 5px;">明天</span>' if is_tomorrow else ''
+                
+                st.markdown(f"""
+                <div style="background: rgba(45, 139, 78, 0.1); padding: 12px; border-radius: 8px; margin-top: 10px; border: 1px solid rgba(45, 139, 78, 0.3);">
+                    <div style="color: #2D8B4E; font-weight: bold; margin-bottom: 8px;">📅 发送计划</div>
+                    <div style="color: #FAF8F5; font-size: 0.9rem; line-height: 1.8;">
+                        🌍 目标时区: <b>{target_target_tz.strftime('%Y-%m-%d %H:%M')}</b> {tomorrow_badge}<br>
+                        🇨🇳 中国时间: <b>{target_local.strftime('%Y-%m-%d %H:%M')}</b><br>
+                        ⏳ 等待时间: <b style="color: #C9A227;">{format_wait_time(wait_seconds)}</b>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # 如果等待时间超过12小时，显示警告
+                if wait_seconds > 12 * 3600:
+                    st.warning("⚠️ 等待时间超过12小时，请确保页面保持打开状态。建议使用快速选择模式先测试功能。")
             
             scheduled_info = {
                 'target_tz': target_tz,
@@ -1669,7 +1942,8 @@ if st.session_state.emails is not None:
                 'target_minute': target_minute,
                 'wait_seconds': wait_seconds,
                 'target_time_local': target_local,
-                'target_time_target_tz': target_target_tz
+                'target_time_target_tz': target_target_tz,
+                'quick_mode': False
             }
     
     st.markdown("---")
@@ -1712,7 +1986,15 @@ if st.session_state.emails is not None:
         if send_mode == "immediate":
             send_btn_label = "📤 立即发送所有邮件"
         else:
-            send_btn_label = f"⏰ 定时发送 ({format_wait_time(scheduled_info['wait_seconds']) if scheduled_info else ''})"
+            if scheduled_info:
+                wait_time_str = format_wait_time(scheduled_info['wait_seconds'])
+                is_quick = scheduled_info.get('quick_mode', False)
+                if is_quick:
+                    send_btn_label = f"⏰ {wait_time_str}后发送"
+                else:
+                    send_btn_label = f"⏰ 定时发送 ({wait_time_str})"
+            else:
+                send_btn_label = "⏰ 定时发送"
         
         if st.button(send_btn_label, use_container_width=True, type="primary"):
             if not all([smtp_server, sender_email, sender_password]):
@@ -1760,6 +2042,7 @@ if st.session_state.emails is not None:
                     # 倒计时等待
                     remaining = wait_seconds
                     start_time = time.time()
+                    is_quick_mode = scheduled_info.get('quick_mode', False)
                     
                     while remaining > 0:
                         elapsed = time.time() - start_time
@@ -1774,41 +2057,89 @@ if st.session_state.emails is not None:
                         mins_left = int((remaining % 3600) // 60)
                         secs_left = int(remaining % 60)
                         
-                        # 更新倒计时显示
-                        countdown_placeholder.markdown(f"""
-                        <div style="background: rgba(201, 162, 39, 0.15); padding: 30px; border-radius: 15px; 
-                                    text-align: center; border: 2px solid rgba(201, 162, 39, 0.4); margin: 20px 0;">
-                            <div style="color: #C9A227; font-size: 1.2rem; font-weight: bold; margin-bottom: 10px;">
-                                ⏳ 距离发送还有
-                            </div>
-                            <div style="display: flex; justify-content: center; gap: 20px; margin: 20px 0;">
-                                <div style="background: rgba(10, 15, 26, 0.6); padding: 15px 25px; border-radius: 10px;">
-                                    <div style="color: #C9A227; font-size: 2.5rem; font-weight: bold;">{hours_left:02d}</div>
-                                    <div style="color: #E8D5B7; font-size: 0.8rem;">小时</div>
+                        # 根据等待时间长短选择不同的显示样式
+                        if wait_seconds <= 300:  # 5分钟以内，紧凑模式
+                            countdown_placeholder.markdown(f"""
+                            <div style="background: linear-gradient(135deg, rgba(45, 139, 78, 0.2), rgba(201, 162, 39, 0.2)); 
+                                        padding: 25px; border-radius: 15px; text-align: center; 
+                                        border: 2px solid rgba(45, 139, 78, 0.4); margin: 20px 0;">
+                                <div style="color: #2D8B4E; font-size: 1.3rem; font-weight: bold; margin-bottom: 15px;">
+                                    ⚡ 快速定时模式 - 即将发送
                                 </div>
-                                <div style="color: #C9A227; font-size: 2.5rem; font-weight: bold; line-height: 60px;">:</div>
-                                <div style="background: rgba(10, 15, 26, 0.6); padding: 15px 25px; border-radius: 10px;">
-                                    <div style="color: #C9A227; font-size: 2.5rem; font-weight: bold;">{mins_left:02d}</div>
-                                    <div style="color: #E8D5B7; font-size: 0.8rem;">分钟</div>
+                                <div style="display: flex; justify-content: center; align-items: center; gap: 10px; margin: 15px 0;">
+                                    <div style="background: rgba(10, 15, 26, 0.7); padding: 20px 30px; border-radius: 12px; 
+                                                border: 2px solid rgba(45, 139, 78, 0.5);">
+                                        <div style="color: #2D8B4E; font-size: 3.5rem; font-weight: bold; font-family: 'Courier New', monospace;">
+                                            {mins_left:02d}:{secs_left:02d}
+                                        </div>
+                                        <div style="color: #E8D5B7; font-size: 0.9rem; margin-top: 5px;">分:秒</div>
+                                    </div>
                                 </div>
-                                <div style="color: #C9A227; font-size: 2.5rem; font-weight: bold; line-height: 60px;">:</div>
-                                <div style="background: rgba(10, 15, 26, 0.6); padding: 15px 25px; border-radius: 10px;">
-                                    <div style="color: #C9A227; font-size: 2.5rem; font-weight: bold;">{secs_left:02d}</div>
-                                    <div style="color: #E8D5B7; font-size: 0.8rem;">秒</div>
+                                <div style="width: 80%; margin: 15px auto; background: rgba(10, 15, 26, 0.5); 
+                                            border-radius: 10px; height: 12px; overflow: hidden;">
+                                    <div style="width: {progress*100}%; height: 100%; 
+                                                background: linear-gradient(90deg, #2D8B4E, #C9A227);
+                                                border-radius: 10px; transition: width 0.3s;"></div>
+                                </div>
+                                <div style="color: #E8D5B7; font-size: 0.9rem;">
+                                    进度: <b style="color: #C9A227;">{progress*100:.0f}%</b> | 请保持页面打开
                                 </div>
                             </div>
-                            <div style="color: #E8D5B7; font-size: 0.9rem;">
-                                🎯 目标时间: {target_time_str} | 进度: {progress*100:.1f}%
+                            """, unsafe_allow_html=True)
+                        else:  # 超过5分钟，完整模式
+                            countdown_placeholder.markdown(f"""
+                            <div style="background: rgba(201, 162, 39, 0.15); padding: 30px; border-radius: 15px; 
+                                        text-align: center; border: 2px solid rgba(201, 162, 39, 0.4); margin: 20px 0;">
+                                <div style="color: #C9A227; font-size: 1.2rem; font-weight: bold; margin-bottom: 10px;">
+                                    ⏳ 距离发送还有
+                                </div>
+                                <div style="display: flex; justify-content: center; gap: 15px; margin: 20px 0;">
+                                    <div style="background: rgba(10, 15, 26, 0.6); padding: 12px 20px; border-radius: 10px;">
+                                        <div style="color: #C9A227; font-size: 2.2rem; font-weight: bold;">{hours_left:02d}</div>
+                                        <div style="color: #E8D5B7; font-size: 0.75rem;">小时</div>
+                                    </div>
+                                    <div style="color: #C9A227; font-size: 2.2rem; font-weight: bold; line-height: 55px;">:</div>
+                                    <div style="background: rgba(10, 15, 26, 0.6); padding: 12px 20px; border-radius: 10px;">
+                                        <div style="color: #C9A227; font-size: 2.2rem; font-weight: bold;">{mins_left:02d}</div>
+                                        <div style="color: #E8D5B7; font-size: 0.75rem;">分钟</div>
+                                    </div>
+                                    <div style="color: #C9A227; font-size: 2.2rem; font-weight: bold; line-height: 55px;">:</div>
+                                    <div style="background: rgba(10, 15, 26, 0.6); padding: 12px 20px; border-radius: 10px;">
+                                        <div style="color: #C9A227; font-size: 2.2rem; font-weight: bold;">{secs_left:02d}</div>
+                                        <div style="color: #E8D5B7; font-size: 0.75rem;">秒</div>
+                                    </div>
+                                </div>
+                                <div style="width: 80%; margin: 15px auto; background: rgba(10, 15, 26, 0.5); 
+                                            border-radius: 8px; height: 8px; overflow: hidden;">
+                                    <div style="width: {progress*100}%; height: 100%; 
+                                                background: linear-gradient(90deg, #C9A227, #E8D5B7);
+                                                border-radius: 8px;"></div>
+                                </div>
+                                <div style="color: #E8D5B7; font-size: 0.9rem;">
+                                    🎯 目标时间: {target_time_str} | 进度: {progress*100:.1f}%
+                                </div>
                             </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                            """, unsafe_allow_html=True)
                         
-                        # 状态提示
-                        status_placeholder.markdown(f"""
-                        <div style="text-align: center; color: #8B7355; font-size: 0.85rem;">
-                            🔄 系统正在等待中... 当前进度 {progress*100:.1f}% | 请勿关闭页面
-                        </div>
-                        """, unsafe_allow_html=True)
+                        # 状态提示 - 根据剩余时间显示不同提示
+                        if remaining <= 10:
+                            status_placeholder.markdown(f"""
+                            <div style="text-align: center; color: #2D8B4E; font-size: 1rem; font-weight: bold;">
+                                🚀 即将开始发送...准备中！
+                            </div>
+                            """, unsafe_allow_html=True)
+                        elif remaining <= 30:
+                            status_placeholder.markdown(f"""
+                            <div style="text-align: center; color: #C9A227; font-size: 0.9rem;">
+                                ⚡ 马上开始！请确保网络连接正常
+                            </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            status_placeholder.markdown(f"""
+                            <div style="text-align: center; color: #8B7355; font-size: 0.85rem;">
+                                🔄 系统正在等待中... 进度 {progress*100:.1f}% | 请勿关闭页面
+                            </div>
+                            """, unsafe_allow_html=True)
                         
                         # 每秒更新一次
                         time.sleep(1)
@@ -1952,6 +2283,16 @@ if st.session_state.emails is not None:
                         'actual_send_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                     }
                 
+                # 🔥 自动保存发送记录到历史文件
+                history_path, save_error = save_send_history(
+                    emails_list=st.session_state.emails,
+                    send_results_df=st.session_state.send_results,
+                    scheduled_send=st.session_state.scheduled_send,
+                    bounce_emails=[]
+                )
+                if history_path:
+                    st.session_state.current_history_file = history_path
+                
                 # 显示发送完成提示
                 st.markdown(f"""
                 <div style="background: linear-gradient(135deg, rgba(45, 139, 78, 0.3), rgba(45, 139, 78, 0.1)); 
@@ -2017,22 +2358,38 @@ if st.session_state.emails is not None:
     with col3:
         # 显示定时发送提示
         if send_mode == "scheduled":
-            st.markdown("""
-            <div style="background: rgba(45, 139, 78, 0.15); padding: 12px; border-radius: 8px; border: 1px solid rgba(45, 139, 78, 0.3);">
-                <div style="color: #2D8B4E; font-weight: bold; font-size: 0.9rem;">💡 定时发送提示</div>
-                <div style="color: #E8D5B7; font-size: 0.8rem; margin-top: 8px;">
-                    • 最佳发送时间：工作日 9-11 AM<br>
-                    • 页面需保持打开状态<br>
-                    • 可随时刷新页面取消
+            is_quick = scheduled_info.get('quick_mode', False) if scheduled_info else False
+            if is_quick:
+                st.markdown("""
+                <div style="background: rgba(45, 139, 78, 0.15); padding: 12px; border-radius: 8px; border: 1px solid rgba(45, 139, 78, 0.3);">
+                    <div style="color: #2D8B4E; font-weight: bold; font-size: 0.9rem;">⚡ 快速测试模式</div>
+                    <div style="color: #E8D5B7; font-size: 0.8rem; margin-top: 8px;">
+                        • 适合测试定时功能<br>
+                        • 短时间内即可验证<br>
+                        • 请保持页面打开<br>
+                        • 刷新页面可取消
+                    </div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
+            else:
+                wait_hrs = scheduled_info['wait_seconds'] // 3600 if scheduled_info else 0
+                st.markdown(f"""
+                <div style="background: rgba(201, 162, 39, 0.15); padding: 12px; border-radius: 8px; border: 1px solid rgba(201, 162, 39, 0.3);">
+                    <div style="color: #C9A227; font-weight: bold; font-size: 0.9rem;">🌍 跨时区定时</div>
+                    <div style="color: #E8D5B7; font-size: 0.8rem; margin-top: 8px;">
+                        • 将在客户工作时间送达<br>
+                        • 等待约 {wait_hrs} 小时<br>
+                        • 页面需保持打开<br>
+                        • 刷新页面可取消
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
         else:
             st.markdown("""
             <div style="background: rgba(201, 162, 39, 0.1); padding: 12px; border-radius: 8px; border: 1px solid rgba(201, 162, 39, 0.3);">
                 <div style="color: #C9A227; font-weight: bold; font-size: 0.9rem;">📧 发送提示</div>
                 <div style="color: #E8D5B7; font-size: 0.8rem; margin-top: 8px;">
-                    • 每封邮件间隔 5-10 秒<br>
+                    • 每封邮件间隔 1 分钟<br>
                     • 避免触发垃圾邮件过滤<br>
                     • 建议先测试发送
                 </div>
@@ -2104,6 +2461,71 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# ============================================
+# 📂 历史记录加载功能
+# ============================================
+history_list = get_history_list()
+
+if history_list or st.session_state.send_results is None:
+    st.markdown("""
+    <div style="background: rgba(100, 149, 237, 0.1); padding: 15px; border-radius: 8px; margin-bottom: 15px; border: 1px solid rgba(100, 149, 237, 0.3);">
+        <span style="color: #6495ED; font-weight: bold;">📂 历史记录</span>
+        <span style="color: #E8D5B7;"> - 可以加载之前的发送记录进行退信检测和归档分析</span>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if history_list:
+        col_hist1, col_hist2 = st.columns([3, 1])
+        
+        with col_hist1:
+            # 创建下拉选择器
+            history_options = ["-- 选择历史记录 --"] + [h['display'] for h in history_list]
+            selected_history = st.selectbox(
+                "选择历史发送记录",
+                options=history_options,
+                label_visibility="collapsed"
+            )
+        
+        with col_hist2:
+            load_history_btn = st.button("📥 加载记录", use_container_width=True)
+        
+        if load_history_btn and selected_history != "-- 选择历史记录 --":
+            # 找到选中的历史记录
+            selected_idx = history_options.index(selected_history) - 1
+            if selected_idx >= 0 and selected_idx < len(history_list):
+                history_data, load_error = load_send_history(history_list[selected_idx]['filepath'])
+                
+                if load_error:
+                    st.error(f"❌ 加载失败: {load_error}")
+                else:
+                    # 恢复数据到 session_state
+                    st.session_state.emails = history_data['emails']
+                    st.session_state.send_results = history_data['send_results']
+                    st.session_state.scheduled_send = history_data['scheduled_send']
+                    st.session_state.bounce_emails = history_data['bounce_emails']
+                    st.session_state.delivery_tracking = history_data['delivery_tracking']
+                    st.session_state.current_history_file = history_data['filepath']
+                    
+                    st.success(f"✅ 已加载历史记录: {history_data['timestamp']}")
+                    st.rerun()
+        
+        # 显示当前加载的记录
+        if st.session_state.current_history_file:
+            st.markdown(f"""
+            <div style="background: rgba(45, 139, 78, 0.1); padding: 10px; border-radius: 6px; margin-top: 10px; border: 1px solid rgba(45, 139, 78, 0.3);">
+                <span style="color: #2D8B4E;">📌 当前记录:</span>
+                <span style="color: #E8D5B7; font-size: 0.9rem;">{os.path.basename(st.session_state.current_history_file)}</span>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="color: #888; font-size: 0.9rem; text-align: center; padding: 10px;">
+            📭 暂无历史记录。发送邮件后，记录将自动保存。
+        </div>
+        """, unsafe_allow_html=True)
+
+st.markdown("---")
+
 if st.session_state.send_results is not None:
     col1, col2, col3 = st.columns(3)
     
@@ -2163,6 +2585,14 @@ if st.session_state.send_results is not None:
                                 'send_date': datetime.now().strftime('%Y-%m-%d')
                             })
                     st.session_state.valid_emails = valid_emails
+                    
+                    # 🔥 更新历史记录中的退信信息
+                    if st.session_state.current_history_file:
+                        update_send_history_bounces(
+                            st.session_state.current_history_file,
+                            bounces,
+                            st.session_state.delivery_tracking
+                        )
                     
                     st.success(f"✅ 检测完成！发现 {len(bounces)} 封退信")
                     st.rerun()
