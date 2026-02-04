@@ -483,11 +483,70 @@ section[data-testid="stSidebar"] span {
 import os
 
 HISTORY_DIR = "send_history"  # 历史记录存储目录
+PROGRESS_FILE = os.path.join(HISTORY_DIR, "_sending_progress.json")  # 发送进度文件
 
 def ensure_history_dir():
     """确保历史记录目录存在"""
     if not os.path.exists(HISTORY_DIR):
         os.makedirs(HISTORY_DIR)
+
+# ============================================
+# 🔥 断点续传功能 - 发送进度管理
+# ============================================
+
+def save_sending_progress(progress_data: dict):
+    """
+    实时保存发送进度到文件
+    每发送一封邮件就调用一次，确保断电/断网后可恢复
+    """
+    ensure_history_dir()
+    try:
+        progress_data['last_updated'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with open(PROGRESS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(progress_data, f, ensure_ascii=False, indent=2, default=str)
+        return True
+    except Exception as e:
+        return False
+
+def load_sending_progress():
+    """
+    加载未完成的发送进度
+    返回 None 表示没有未完成的任务
+    """
+    if not os.path.exists(PROGRESS_FILE):
+        return None
+    try:
+        with open(PROGRESS_FILE, 'r', encoding='utf-8') as f:
+            progress = json.load(f)
+        # 检查是否是有效的未完成任务
+        if progress.get('status') == 'completed':
+            return None
+        return progress
+    except Exception:
+        return None
+
+def clear_sending_progress():
+    """清除发送进度文件（发送完成后调用）"""
+    if os.path.exists(PROGRESS_FILE):
+        try:
+            os.remove(PROGRESS_FILE)
+        except:
+            pass
+
+def get_unsent_emails(all_emails: list, sent_results: list) -> list:
+    """
+    获取尚未发送的邮件列表
+    根据已发送结果，过滤出还未发送的邮件
+    """
+    sent_emails = set()
+    for result in sent_results:
+        sent_emails.add(result.get('to_email', '').lower())
+    
+    unsent = []
+    for email in all_emails:
+        if email.get('to_email', '').lower() not in sent_emails:
+            unsent.append(email)
+    return unsent
 
 def save_send_history(emails_list, send_results_df, scheduled_send=None, bounce_emails=None):
     """
@@ -617,6 +676,11 @@ if 'send_results' not in st.session_state:
     st.session_state.send_results = None
 if 'current_step' not in st.session_state:
     st.session_state.current_step = 1
+# 🔥 断点续传相关
+if 'resume_mode' not in st.session_state:
+    st.session_state.resume_mode = False
+if 'resume_progress' not in st.session_state:
+    st.session_state.resume_progress = None
 # 退信监控相关
 if 'delivery_tracking' not in st.session_state:
     st.session_state.delivery_tracking = None  # 邮件投递追踪记录
@@ -1746,6 +1810,78 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# 🔥 断点续传检测 - 检查是否有未完成的发送任务
+pending_progress = load_sending_progress()
+if pending_progress and pending_progress.get('status') == 'sending':
+    sent_count = len(pending_progress.get('sent_results', []))
+    total_count = pending_progress.get('total_emails', 0)
+    unsent_count = total_count - sent_count
+    started_at = pending_progress.get('started_at', '未知')
+    last_updated = pending_progress.get('last_updated', '未知')
+    
+    # 计算成功/失败数
+    prev_success = pending_progress.get('success_count', 0)
+    prev_fail = pending_progress.get('fail_count', 0)
+    
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, rgba(201, 162, 39, 0.2), rgba(168, 50, 50, 0.2)); 
+                padding: 20px; border-radius: 15px; margin: 20px 0; 
+                border: 2px solid rgba(201, 162, 39, 0.5);">
+        <div style="color: #C9A227; font-size: 1.5rem; font-weight: bold; margin-bottom: 15px;">
+            ⚠️ 检测到未完成的发送任务！
+        </div>
+        <div style="color: #FAF8F5; line-height: 1.8;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;">
+                <div style="background: rgba(10, 15, 26, 0.5); padding: 12px; border-radius: 8px;">
+                    <div style="color: #E8D5B7; font-size: 0.85rem;">开始时间</div>
+                    <div style="color: #C9A227; font-size: 1.1rem; font-weight: bold;">{started_at}</div>
+                </div>
+                <div style="background: rgba(10, 15, 26, 0.5); padding: 12px; border-radius: 8px;">
+                    <div style="color: #E8D5B7; font-size: 0.85rem;">最后更新</div>
+                    <div style="color: #C9A227; font-size: 1.1rem; font-weight: bold;">{last_updated}</div>
+                </div>
+            </div>
+            <div style="display: flex; justify-content: space-around; text-align: center; 
+                        background: rgba(10, 15, 26, 0.5); padding: 15px; border-radius: 8px;">
+                <div>
+                    <div style="color: #FAF8F5; font-size: 2rem; font-weight: bold;">{total_count}</div>
+                    <div style="color: #E8D5B7; font-size: 0.85rem;">总邮件数</div>
+                </div>
+                <div>
+                    <div style="color: #2D8B4E; font-size: 2rem; font-weight: bold;">{prev_success}</div>
+                    <div style="color: #E8D5B7; font-size: 0.85rem;">已成功</div>
+                </div>
+                <div>
+                    <div style="color: #A83232; font-size: 2rem; font-weight: bold;">{prev_fail}</div>
+                    <div style="color: #E8D5B7; font-size: 0.85rem;">已失败</div>
+                </div>
+                <div>
+                    <div style="color: #C9A227; font-size: 2rem; font-weight: bold;">{unsent_count}</div>
+                    <div style="color: #E8D5B7; font-size: 0.85rem;">待发送</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    col_resume, col_discard = st.columns(2)
+    
+    with col_resume:
+        if st.button("🔄 继续发送剩余邮件", use_container_width=True, type="primary"):
+            # 恢复邮件列表和已发送结果
+            st.session_state.emails = pending_progress.get('all_emails', [])
+            st.session_state.resume_progress = pending_progress
+            st.session_state.resume_mode = True
+            st.rerun()
+    
+    with col_discard:
+        if st.button("🗑️ 放弃并开始新任务", use_container_width=True):
+            clear_sending_progress()
+            st.success("✅ 已清除未完成的任务，可以开始新的发送。")
+            st.rerun()
+    
+    st.markdown("---")
+
 if st.session_state.emails is not None:
     # ============================================
     # SCHEDULED SEND OPTIONS
@@ -2164,21 +2300,79 @@ if st.session_state.emails is not None:
                     time.sleep(1)
                 
                 # 开始发送邮件
-                send_results = []
-                total_to_send = len(st.session_state.emails)
+                all_emails = st.session_state.emails.copy()
+                total_all_emails = len(all_emails)
+                
+                # 🔥 检查是否是恢复模式
+                is_resume_mode = st.session_state.get('resume_mode', False)
+                resume_progress = st.session_state.get('resume_progress', None)
+                
+                if is_resume_mode and resume_progress:
+                    # 恢复模式：获取已发送的结果和待发送的邮件
+                    send_results = resume_progress.get('sent_results', []).copy()
+                    success_count = resume_progress.get('success_count', 0)
+                    fail_count = resume_progress.get('fail_count', 0)
+                    
+                    # 获取未发送的邮件
+                    emails_to_send = get_unsent_emails(all_emails, send_results)
+                    
+                    # 重置恢复模式标记
+                    st.session_state.resume_mode = False
+                    st.session_state.resume_progress = None
+                    
+                    # 使用原始进度数据继续
+                    progress_data = resume_progress.copy()
+                    progress_data['status'] = 'sending'
+                    
+                    st.info(f"🔄 恢复模式：已跳过 {len(send_results)} 封已发送邮件，继续发送剩余 {len(emails_to_send)} 封...")
+                else:
+                    # 新发送：所有邮件都待发送
+                    send_results = []
+                    emails_to_send = all_emails
+                    success_count = 0
+                    fail_count = 0
+                    
+                    # 初始化发送进度跟踪
+                    progress_data = {
+                        'status': 'sending',
+                        'started_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'total_emails': total_all_emails,
+                        'all_emails': all_emails,  # 保存完整邮件列表
+                        'sent_results': [],  # 已发送结果
+                        'smtp_config': {
+                            'server': smtp_server,
+                            'port': smtp_port,
+                            'email': sender_email
+                            # 不保存密码，续传时需要重新输入
+                        },
+                        'scheduled_info': scheduled_info if send_mode == "scheduled" else None
+                    }
+                
+                save_sending_progress(progress_data)
+                
+                total_to_send = len(emails_to_send)
+                already_sent = len(send_results)
+                
+                # 如果没有待发送的邮件
+                if total_to_send == 0:
+                    st.success("✅ 所有邮件已发送完成，无需继续！")
+                    clear_sending_progress()
+                    st.rerun()
                 
                 # 创建发送状态显示区域
                 send_status_container = st.container()
+                
+                resume_badge = "（恢复模式）" if is_resume_mode else ""
                 
                 with send_status_container:
                     st.markdown(f"""
                     <div style="background: rgba(45, 139, 78, 0.15); padding: 15px; border-radius: 10px; 
                                 text-align: center; border: 1px solid rgba(45, 139, 78, 0.3); margin-bottom: 15px;">
                         <div style="color: #2D8B4E; font-size: 1.2rem; font-weight: bold;">
-                            📤 正在发送邮件中...
+                            📤 正在发送邮件中... {resume_badge}
                         </div>
                         <div style="color: #E8D5B7; font-size: 0.9rem; margin-top: 5px;">
-                            共 {total_to_send} 封邮件待发送
+                            {'待发送 ' + str(total_to_send) + ' 封' if already_sent == 0 else '继续发送剩余 ' + str(total_to_send) + ' 封（已发送 ' + str(already_sent) + ' 封）'}
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
@@ -2202,10 +2396,7 @@ if st.session_state.emails is not None:
                     marketing_image.seek(0)
                     image_data = marketing_image.read()
                 
-                success_count = 0
-                fail_count = 0
-                
-                for i, email in enumerate(st.session_state.emails):
+                for i, email in enumerate(emails_to_send):
                     # 发送延迟：每封邮件间隔1分钟，避免被邮件服务商封号
                     if i > 0:
                         delay = 60  # 固定1分钟间隔
@@ -2219,12 +2410,13 @@ if st.session_state.emails is not None:
                             """, unsafe_allow_html=True)
                             time.sleep(1)
                     
-                    # 显示当前发送的邮件
+                    # 显示当前发送的邮件（含总进度）
+                    overall_progress = already_sent + i + 1
                     current_email_display.markdown(f"""
                     <div style="background: rgba(26, 37, 64, 0.5); padding: 12px; border-radius: 8px; 
                                 border-left: 3px solid #C9A227;">
                         <div style="color: #C9A227; font-weight: bold;">
-                            📧 正在发送 ({i+1}/{total_to_send})
+                            📧 正在发送 ({i+1}/{total_to_send}) | 总进度: {overall_progress}/{total_all_emails}
                         </div>
                         <div style="color: #FAF8F5; margin-top: 5px;">
                             公司: {email['company']}<br>
@@ -2263,14 +2455,22 @@ if st.session_state.emails is not None:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    send_results.append({
+                    result_entry = {
                         'company': email['company'],
                         'to_email': email['to_email'],
                         'email_type': email.get('email_type', '通用'),
                         'status': 'Success' if success else 'Failed',
                         'message': message,
                         'send_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    })
+                    }
+                    send_results.append(result_entry)
+                    
+                    # 🔥 实时保存发送进度（断点续传核心）
+                    progress_data['sent_results'] = send_results.copy()
+                    progress_data['current_index'] = i + 1
+                    progress_data['success_count'] = success_count
+                    progress_data['fail_count'] = fail_count
+                    save_sending_progress(progress_data)
                 
                 st.session_state.send_results = pd.DataFrame(send_results)
                 
@@ -2292,6 +2492,9 @@ if st.session_state.emails is not None:
                 )
                 if history_path:
                     st.session_state.current_history_file = history_path
+                
+                # 🔥 发送完成，清除进度文件
+                clear_sending_progress()
                 
                 # 显示发送完成提示
                 st.markdown(f"""
