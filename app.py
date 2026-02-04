@@ -2397,15 +2397,13 @@ if st.session_state.emails is not None:
                     image_data = marketing_image.read()
                 
                 for i, email in enumerate(emails_to_send):
-                    # 发送延迟：每封邮件间隔1分钟，避免被邮件服务商封号
+                    # 发送延迟：每封邮件间隔20秒，避免被邮件服务商封号
                     if i > 0:
-                        delay = 60  # 固定1分钟间隔
+                        delay = 20  # 固定20秒间隔
                         for countdown in range(delay, 0, -1):
-                            mins = countdown // 60
-                            secs = countdown % 60
                             status_text.markdown(f"""
                             <div style="color: #C9A227; font-size: 0.9rem;">
-                                ⏳ 等待 {mins}分{secs:02d}秒 后发送下一封（避免触发垃圾邮件过滤）...
+                                ⏳ 等待 {countdown} 秒后发送下一封（避免触发垃圾邮件过滤）...
                             </div>
                             """, unsafe_allow_html=True)
                             time.sleep(1)
@@ -2592,7 +2590,7 @@ if st.session_state.emails is not None:
             <div style="background: rgba(201, 162, 39, 0.1); padding: 12px; border-radius: 8px; border: 1px solid rgba(201, 162, 39, 0.3);">
                 <div style="color: #C9A227; font-weight: bold; font-size: 0.9rem;">📧 发送提示</div>
                 <div style="color: #E8D5B7; font-size: 0.8rem; margin-top: 8px;">
-                    • 每封邮件间隔 1 分钟<br>
+                    • 每封邮件间隔 20 秒<br>
                     • 避免触发垃圾邮件过滤<br>
                     • 建议先测试发送
                 </div>
