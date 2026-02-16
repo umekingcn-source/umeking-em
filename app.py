@@ -1830,6 +1830,16 @@ with st.sidebar:
     
     # Email Settings
     st.markdown("### 📧 Email Settings")
+    
+    # 🔄 多邮箱发送模式
+    email_send_mode = st.radio(
+        "发送模式",
+        options=["single", "rotate"],
+        format_func=lambda x: "📧 单邮箱发送" if x == "single" else "🔄 多邮箱轮换发送",
+        horizontal=True,
+        help="轮换发送可以分散发送压力，提升触达率"
+    )
+    
     smtp_server = st.text_input(
         "SMTP Server",
         value="smtp.mxhichina.com",
@@ -1844,18 +1854,44 @@ with st.sidebar:
         help="阿里云企业邮箱使用 465 (SSL)"
     )
     
+    st.markdown("#### 📧 邮箱 1（主邮箱）")
     sender_email = st.text_input(
-        "Sender Email",
+        "Email 1",
         value="evelynluk@u-meking.com",
-        placeholder="your@email.com"
+        placeholder="your@email.com",
+        key="sender_email_1"
     )
     
     sender_password = st.text_input(
-        "Email Password / App Password",
+        "Password 1",
         type="password",
         placeholder="App-specific password",
-        help="For Gmail, use App Password"
+        help="For Gmail, use App Password",
+        key="sender_password_1"
     )
+    
+    # 第二个邮箱配置（轮换模式时显示）
+    sender_email_2 = ""
+    sender_password_2 = ""
+    
+    if email_send_mode == "rotate":
+        st.markdown("#### 📧 邮箱 2（轮换邮箱）")
+        sender_email_2 = st.text_input(
+            "Email 2",
+            value="evelynlu@u-meking.com",
+            placeholder="second@email.com",
+            key="sender_email_2"
+        )
+        
+        sender_password_2 = st.text_input(
+            "Password 2",
+            type="password",
+            placeholder="App-specific password",
+            key="sender_password_2"
+        )
+        
+        # 显示轮换策略说明
+        st.info("🔄 轮换模式：系统将交替使用两个邮箱发送邮件，每封邮件切换一次，分散发送压力")
     
     st.markdown("---")
     
@@ -2863,8 +2899,16 @@ if st.session_state.emails is not None:
                 send_btn_label = "⏰ 定时发送"
         
         if st.button(send_btn_label, use_container_width=True, type="primary"):
-            if not all([smtp_server, sender_email, sender_password]):
-                st.error("⚠️ Please configure all email settings in the sidebar.")
+            # 检查邮箱配置
+            email_config_valid = all([smtp_server, sender_email, sender_password])
+            if email_send_mode == "rotate":
+                email_config_valid = email_config_valid and all([sender_email_2, sender_password_2])
+            
+            if not email_config_valid:
+                if email_send_mode == "rotate":
+                    st.error("⚠️ 轮换模式需要配置两个邮箱。请在侧边栏完成所有邮箱设置。")
+                else:
+                    st.error("⚠️ 请在侧边栏配置邮箱设置。")
             else:
                 # 如果是定时发送，先等待
                 if send_mode == "scheduled" and scheduled_info:
@@ -3112,13 +3156,27 @@ if st.session_state.emails is not None:
                     current_email_display = st.empty()
                     success_count_display = st.empty()
                 
-                # 准备 SMTP 设置
-                smtp_settings = {
+                # 🔄 准备多邮箱 SMTP 设置
+                smtp_settings_list = []
+                
+                # 主邮箱配置
+                smtp_settings_1 = {
                     'server': smtp_server,
                     'port': smtp_port,
                     'email': sender_email,
                     'password': sender_password
                 }
+                smtp_settings_list.append(smtp_settings_1)
+                
+                # 如果是轮换模式，添加第二个邮箱
+                if email_send_mode == "rotate" and sender_email_2 and sender_password_2:
+                    smtp_settings_2 = {
+                        'server': smtp_server,
+                        'port': smtp_port,
+                        'email': sender_email_2,
+                        'password': sender_password_2
+                    }
+                    smtp_settings_list.append(smtp_settings_2)
                 
                 # 准备附件
                 image_data = None
@@ -3127,6 +3185,11 @@ if st.session_state.emails is not None:
                     image_data = marketing_image.read()
                 
                 for i, email in enumerate(emails_to_send):
+                    # 🔄 邮箱轮换：根据索引选择邮箱
+                    current_smtp = smtp_settings_list[i % len(smtp_settings_list)]
+                    current_sender = current_smtp['email']
+                    sender_label = f"📧{(i % len(smtp_settings_list)) + 1}" if len(smtp_settings_list) > 1 else "📧"
+                    
                     # 发送延迟：每封邮件间隔20秒，避免被邮件服务商封号
                     if i > 0:
                         delay = 20  # 固定20秒间隔
@@ -3138,8 +3201,9 @@ if st.session_state.emails is not None:
                             """, unsafe_allow_html=True)
                             time.sleep(1)
                     
-                    # 显示当前发送的邮件（含总进度）
+                    # 显示当前发送的邮件（含总进度和发送邮箱）
                     overall_progress = already_sent + i + 1
+                    rotate_info = f"<br>发件邮箱: {sender_label} {current_sender}" if len(smtp_settings_list) > 1 else ""
                     current_email_display.markdown(f"""
                     <div style="background: rgba(26, 37, 64, 0.5); padding: 12px; border-radius: 8px; 
                                 border-left: 3px solid #C9A227;">
@@ -3149,21 +3213,21 @@ if st.session_state.emails is not None:
                         <div style="color: #FAF8F5; margin-top: 5px;">
                             公司: {email['company']}<br>
                             收件人: {email['to_email']}<br>
-                            类型: {email.get('email_type', '通用')}邮箱
+                            类型: {email.get('email_type', '通用')}邮箱{rotate_info}
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
                     
                     status_text.markdown(f"""
                     <div style="color: #E8D5B7; font-size: 0.9rem;">
-                        🔄 正在连接邮件服务器并发送...
+                        🔄 正在使用 {current_sender} 连接邮件服务器并发送...
                     </div>
                     """, unsafe_allow_html=True)
                     
                     progress_bar.progress((i + 1) / total_to_send)
                     
                     success, message = send_email(
-                        smtp_settings=smtp_settings,
+                        smtp_settings=current_smtp,  # 使用当前轮换的邮箱
                         to_email=email['to_email'],
                         subject=email['subject'],
                         body_text=email['body'],
@@ -3187,6 +3251,7 @@ if st.session_state.emails is not None:
                         'company': email['company'],
                         'to_email': email['to_email'],
                         'email_type': email.get('email_type', '通用'),
+                        'from_email': current_sender,  # 记录发件邮箱
                         'status': 'Success' if success else 'Failed',
                         'message': message,
                         'send_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -3254,11 +3319,11 @@ if st.session_state.emails is not None:
     with col2:
         if st.button("🧪 测试发送（仅第一封）", use_container_width=True):
             if not all([smtp_server, sender_email, sender_password]):
-                st.error("⚠️ Please configure all email settings in the sidebar.")
+                st.error("⚠️ 请在侧边栏配置邮箱设置。")
             elif len(st.session_state.emails) > 0:
                 email = st.session_state.emails[0]
                 
-                # 准备 SMTP 设置
+                # 准备 SMTP 设置（测试使用主邮箱）
                 smtp_settings = {
                     'server': smtp_server,
                     'port': smtp_port,
@@ -3272,7 +3337,7 @@ if st.session_state.emails is not None:
                     marketing_image.seek(0)
                     image_data = marketing_image.read()
                 
-                with st.spinner("Sending test email..."):
+                with st.spinner(f"使用 {sender_email} 发送测试邮件..."):
                     success, message = send_email(
                         smtp_settings=smtp_settings,
                         to_email=email['to_email'],
@@ -3282,9 +3347,9 @@ if st.session_state.emails is not None:
                     )
                 
                 if success:
-                    st.success(f"✅ Test email sent to {email['to_email']}")
+                    st.success(f"✅ 测试邮件已发送至 {email['to_email']}（使用 {sender_email}）")
                 else:
-                    st.error(f"❌ Failed: {message}")
+                    st.error(f"❌ 发送失败: {message}")
     
     with col3:
         # 显示定时发送提示
