@@ -664,6 +664,102 @@ def load_send_history(filepath):
         return None, str(e)
 
 # ============================================
+# 🚫 已发送公司去重功能
+# ============================================
+
+def get_all_sent_companies():
+    """
+    汇总所有历史记录中已发送的公司信息
+    返回一个包含公司名、邮箱、发送时间等信息的列表
+    """
+    ensure_history_dir()
+    sent_companies = []
+    seen_companies = set()  # 用于去重
+    
+    try:
+        for filename in os.listdir(HISTORY_DIR):
+            if filename.startswith('send_') and filename.endswith('.json'):
+                filepath = os.path.join(HISTORY_DIR, filename)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    
+                    send_results = data.get('send_results', [])
+                    emails_data = data.get('emails', [])
+                    timestamp = data.get('timestamp', '')
+                    
+                    # 创建邮件数据的查找映射
+                    email_map = {}
+                    for email_item in emails_data:
+                        company = email_item.get('company', '').strip().lower()
+                        if company:
+                            email_map[company] = email_item
+                    
+                    # 从发送结果中提取成功发送的公司
+                    for result in send_results:
+                        if result.get('status') == 'Success':
+                            company_name = result.get('company', '').strip()
+                            to_email = result.get('to_email', '')
+                            company_key = company_name.lower()
+                            
+                            if company_key and company_key not in seen_companies:
+                                seen_companies.add(company_key)
+                                
+                                # 获取详细信息
+                                email_details = email_map.get(company_key, {})
+                                
+                                sent_companies.append({
+                                    'company': company_name,
+                                    'country': email_details.get('country', result.get('country', '')),
+                                    'industry': email_details.get('industry', ''),
+                                    'to_email': to_email,
+                                    'decision_maker': email_details.get('decision_maker', ''),
+                                    'send_time': result.get('send_time', timestamp),
+                                    'pain_point': email_details.get('pain_point', ''),
+                                    'strategy': email_details.get('strategy', '')
+                                })
+                except:
+                    continue
+        
+        # 按发送时间倒序排列
+        sent_companies.sort(key=lambda x: x.get('send_time', ''), reverse=True)
+        return sent_companies
+    except:
+        return []
+
+def get_sent_company_names():
+    """
+    获取所有已发送公司的名称列表（用于AI筛选）
+    """
+    sent_companies = get_all_sent_companies()
+    return [c['company'] for c in sent_companies]
+
+def format_sent_companies_for_ai():
+    """
+    格式化已发送公司列表，供AI在推荐时参考排除
+    """
+    sent_names = get_sent_company_names()
+    if not sent_names:
+        return ""
+    
+    # 按照国家/地区分组
+    sent_companies = get_all_sent_companies()
+    countries = {}
+    for c in sent_companies:
+        country = c.get('country', 'Unknown')
+        if country not in countries:
+            countries[country] = []
+        countries[country].append(c['company'])
+    
+    result = "\n**⚠️ 以下公司已经联系过，请勿重复推荐：**\n"
+    for country, names in countries.items():
+        result += f"\n【{country}】{', '.join(names[:20])}"
+        if len(names) > 20:
+            result += f" 等{len(names)}家"
+    
+    return result
+
+# ============================================
 # INITIALIZE SESSION STATE
 # ============================================
 if 'companies' not in st.session_state:
@@ -708,6 +804,9 @@ if 'send_mode' not in st.session_state:
 # 历史记录相关
 if 'current_history_file' not in st.session_state:
     st.session_state.current_history_file = None  # 当前加载的历史记录文件路径
+# 已发送公司数据库
+if 'sent_companies_db' not in st.session_state:
+    st.session_state.sent_companies_db = None  # 已发送公司汇总
 
 # ============================================
 # TIMEZONE CONSTANTS
@@ -792,10 +891,13 @@ def encode_image_to_base64(image_file):
 # AI INTELLIGENT QUERY FUNCTIONS
 # ============================================
 
-def query_target_companies(api_key: str, user_query: str, product_services: str = None) -> str:
+def query_target_companies(api_key: str, user_query: str, product_services: str = None, exclude_sent: bool = True) -> str:
     """
     使用Gemini AI查询目标公司列表
     用户可以提问类似"帮我整理20家荷兰的目标公司"这样的问题
+    
+    参数:
+        exclude_sent: 是否自动排除已发送的公司
     """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.0-flash')
@@ -826,7 +928,6 @@ def query_target_companies(api_key: str, user_query: str, product_services: str 
 
 **重要说明：**
 - 推荐中小型企业，决策链条短，更容易合作
-- 请剔除已经推荐过的公司（如果用户有说明）
 - 每家公司都要有明确的切入点和产品推荐
 - 公司名称使用英文原名
 - 分析内容要具体、可操作"""
@@ -838,6 +939,15 @@ def query_target_companies(api_key: str, user_query: str, product_services: str 
 {product_services}
 
 请根据上述产品服务，推荐最匹配的目标客户。"""
+    
+    # 🚫 自动添加已发送公司排除列表
+    if exclude_sent:
+        sent_companies_text = format_sent_companies_for_ai()
+        if sent_companies_text:
+            system_prompt += f"""
+{sent_companies_text}
+
+**请严格遵守：不要推荐上述已联系过的公司！**"""
     
     full_prompt = f"{system_prompt}\n\n**用户问题：**\n{user_query}"
     
@@ -1781,6 +1891,53 @@ with st.sidebar:
     
     st.markdown("---")
     
+    # 🚫 已发送公司数据库
+    st.markdown("### 🚫 已发送公司数据库")
+    
+    # 刷新按钮
+    if st.button("🔄 刷新已发送公司", use_container_width=True, help="从所有历史记录中汇总已发送的公司"):
+        st.session_state.sent_companies_db = get_all_sent_companies()
+        st.rerun()
+    
+    # 获取已发送公司数量
+    sent_companies = get_all_sent_companies()
+    sent_count = len(sent_companies)
+    
+    if sent_count > 0:
+        st.success(f"📊 共 **{sent_count}** 家公司已联系")
+        
+        # 按国家统计
+        country_stats = {}
+        for c in sent_companies:
+            country = c.get('country', '未知')
+            country_stats[country] = country_stats.get(country, 0) + 1
+        
+        with st.expander(f"📍 按国家/地区分布 ({len(country_stats)} 个)", expanded=False):
+            for country, count in sorted(country_stats.items(), key=lambda x: x[1], reverse=True):
+                st.write(f"• {country}: {count} 家")
+        
+        with st.expander("📋 查看已发送公司列表", expanded=False):
+            for c in sent_companies[:50]:  # 最多显示50个
+                st.write(f"• **{c['company']}** ({c.get('country', '')}) - {c.get('send_time', '')[:10]}")
+            if sent_count > 50:
+                st.info(f"... 还有 {sent_count - 50} 家公司未显示")
+        
+        # 导出按钮
+        if sent_companies:
+            df_export = pd.DataFrame(sent_companies)
+            csv_data = df_export.to_csv(index=False, encoding='utf-8-sig')
+            st.download_button(
+                "📥 导出已发送公司列表",
+                data=csv_data,
+                file_name=f"sent_companies_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+    else:
+        st.info("📭 暂无发送记录")
+    
+    st.markdown("---")
+    
     # Reset button
     if st.button("🔄 Reset All Data", use_container_width=True):
         st.session_state.companies = None
@@ -1841,7 +1998,10 @@ st.session_state.input_mode = input_mode
 # AI智能问答模式
 # ============================================
 if input_mode == "ai_query":
-    st.markdown("""
+    # 获取已发送公司数量
+    sent_count = len(get_all_sent_companies())
+    
+    st.markdown(f"""
     <div style="background: rgba(45, 139, 78, 0.1); padding: 15px; border-radius: 10px; margin: 15px 0; border: 1px solid rgba(45, 139, 78, 0.3);">
         <div style="color: #2D8B4E; font-weight: bold; font-size: 1.1rem; margin-bottom: 10px;">
             🎯 AI智能问答 - 直接获取目标公司
@@ -1852,6 +2012,22 @@ if input_mode == "ai_query":
         </div>
     </div>
     """, unsafe_allow_html=True)
+    
+    # 🚫 已发送公司去重提示
+    if sent_count > 0:
+        st.markdown(f"""
+        <div style="background: rgba(201, 162, 39, 0.1); padding: 12px 15px; border-radius: 8px; margin: 10px 0; border: 1px solid rgba(201, 162, 39, 0.3);">
+            <span style="color: #C9A227;">🚫 <b>智能去重已启用</b></span>
+            <span style="color: #E8D5B7; font-size: 0.9rem;"> - 系统已记录 <b>{sent_count}</b> 家已联系公司，AI将自动避免重复推荐</span>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # 去重选项
+    exclude_sent_companies = st.checkbox(
+        "🚫 自动排除已发送公司",
+        value=True,
+        help=f"勾选后AI会自动排除已发送的 {sent_count} 家公司，避免重复联系"
+    )
     
     # 产品服务描述（可选）
     with st.expander("📦 我司产品/服务描述（可选，帮助AI更精准推荐）", expanded=False):
@@ -1885,13 +2061,18 @@ if input_mode == "ai_query":
             elif not user_query.strip():
                 st.error("⚠️ 请输入你的问题")
             else:
+                # 显示去重状态
+                if exclude_sent_companies and sent_count > 0:
+                    st.info(f"🚫 已启用智能去重，将自动排除 {sent_count} 家已联系公司")
+                
                 with st.spinner("🤖 AI正在分析并整理目标公司列表..."):
                     try:
-                        # 第一步：获取AI回答
+                        # 第一步：获取AI回答（传入去重选项）
                         ai_response = query_target_companies(
                             gemini_key, 
                             user_query, 
-                            st.session_state.product_services
+                            st.session_state.product_services,
+                            exclude_sent=exclude_sent_companies  # 传入去重选项
                         )
                         st.session_state.ai_query_response = ai_response
                         
