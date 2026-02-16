@@ -676,6 +676,15 @@ if 'send_results' not in st.session_state:
     st.session_state.send_results = None
 if 'current_step' not in st.session_state:
     st.session_state.current_step = 1
+# AI智能问答相关
+if 'ai_query_response' not in st.session_state:
+    st.session_state.ai_query_response = None  # AI问答的原始回复
+if 'ai_parsed_companies' not in st.session_state:
+    st.session_state.ai_parsed_companies = None  # 解析出的公司详细信息
+if 'input_mode' not in st.session_state:
+    st.session_state.input_mode = "ai_query"  # 输入模式: ai_query / screenshot
+if 'product_services' not in st.session_state:
+    st.session_state.product_services = None  # 保存用户产品服务描述
 # 🔥 断点续传相关
 if 'resume_mode' not in st.session_state:
     st.session_state.resume_mode = False
@@ -778,6 +787,309 @@ def format_wait_time(seconds: float) -> str:
 def encode_image_to_base64(image_file):
     """Encode uploaded image to base64 string."""
     return base64.b64encode(image_file.read()).decode('utf-8')
+
+# ============================================
+# AI INTELLIGENT QUERY FUNCTIONS
+# ============================================
+
+def query_target_companies(api_key: str, user_query: str, product_services: str = None) -> str:
+    """
+    使用Gemini AI查询目标公司列表
+    用户可以提问类似"帮我整理20家荷兰的目标公司"这样的问题
+    """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    
+    # 构建系统提示，指导AI返回结构化的公司信息
+    system_prompt = """你是一位专业的B2B销售策略顾问，专门帮助推广定制品牌礼品和包装解决方案。
+
+用户会询问关于目标客户的问题，请根据你的专业知识，帮助用户整理目标公司列表。
+
+**你必须返回以下格式的表格内容（方便复制到Excel）：**
+
+日期\t公司名 (Company Name)\t国别\t行业\t合作点与切入分析 (Strategy & Opportunity)
+
+**每家公司的切入分析必须包含：**
+1. 具体的产品推荐（如：套装礼盒、定制包装袋、促销品等）
+2. 针对该公司业务类型的痛点分析
+3. 如何用定制品牌解决方案解决他们的问题
+
+**推荐产品类型参考：**
+- 珠宝/首饰店：绒布袋、抛光布、展示盒
+- 健身房/运动：定制毛巾、水壶、运动包
+- 餐饮业：餐巾、桌卡、菜单夹
+- 零售/时尚：购物袋、薄纸、礼品盒
+- 科技公司：数据线收纳、电脑包、桌面配件
+- 咖啡/茶饮：围裙、杯垫、托特袋
+- 美妆护肤：化妆包、发带、收纳袋
+- 单车/骑行：反光配件、骑行包、工具卡
+
+**重要说明：**
+- 推荐中小型企业，决策链条短，更容易合作
+- 请剔除已经推荐过的公司（如果用户有说明）
+- 每家公司都要有明确的切入点和产品推荐
+- 公司名称使用英文原名
+- 分析内容要具体、可操作"""
+
+    if product_services:
+        system_prompt += f"""
+
+**用户的产品/服务描述：**
+{product_services}
+
+请根据上述产品服务，推荐最匹配的目标客户。"""
+    
+    full_prompt = f"{system_prompt}\n\n**用户问题：**\n{user_query}"
+    
+    response = model.generate_content(full_prompt)
+    return response.text
+
+def parse_companies_from_ai_response(api_key: str, ai_response: str) -> list:
+    """
+    使用Gemini解析AI回复中的公司信息
+    返回结构化的公司列表，包含切入点分析
+    """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    
+    prompt = f"""请从以下内容中提取所有公司信息，返回JSON数组格式。
+
+**每个公司对象必须包含以下字段：**
+- company: 公司名（英文原名）
+- country: 国别
+- industry: 行业
+- strategy: 合作点与切入分析（完整内容）
+- product_recommendations: 推荐产品列表（数组）
+- pain_point: 该公司/行业的痛点
+
+**示例返回格式：**
+[
+  {{
+    "company": "Ace & Tate",
+    "country": "Netherlands",
+    "industry": "眼镜/生活",
+    "strategy": "切入夏季海滩套装。知名眼镜品牌。推荐超细纤维眼镜布+沙滩网眼袋+挂绳，作为夏季促销礼包。",
+    "product_recommendations": ["超细纤维眼镜布", "沙滩网眼袋", "挂绳"],
+    "pain_point": "夏季促销需要差异化的增值礼品来吸引顾客"
+  }}
+]
+
+**需要解析的内容：**
+{ai_response}
+
+请仅返回JSON数组，不要添加其他内容。如果找不到公司信息，返回空数组 []。"""
+    
+    response = model.generate_content(prompt)
+    result = response.text.strip()
+    
+    # 清理JSON格式
+    if result.startswith("```"):
+        result = result.split("```")[1]
+        if result.startswith("json"):
+            result = result[4:]
+    result = result.strip()
+    
+    try:
+        companies = json.loads(result)
+        return companies if isinstance(companies, list) else []
+    except:
+        return []
+
+def search_decision_maker_emails(serper_key: str, gemini_key: str, company_name: str, country: str = "") -> dict:
+    """
+    搜索公司决策人邮箱，包括个人邮箱和公司通用邮箱
+    使用多种搜索策略来提高找到邮箱的概率
+    """
+    url = "https://google.serper.dev/search"
+    headers = {
+        'X-API-KEY': serper_key,
+        'Content-Type': 'application/json'
+    }
+    
+    # 多种搜索策略
+    search_queries = [
+        # 决策人搜索
+        f'"{company_name}" CEO OR founder OR owner email contact {country}',
+        # 公司官网联系方式
+        f'"{company_name}" contact us email site:{company_name.lower().replace(" ", "")}.com OR site:{company_name.lower().replace(" ", "")}.nl OR site:{company_name.lower().replace(" ", "")}.co',
+        # LinkedIn搜索决策人
+        f'site:linkedin.com "{company_name}" CEO OR founder OR owner {country}',
+        # 邮箱格式搜索
+        f'"{company_name}" "@" email contact info hello',
+        # Hunter.io等邮箱数据库
+        f'"{company_name}" email format pattern',
+    ]
+    
+    all_results = {
+        'organic': [],
+        'queries_used': search_queries
+    }
+    
+    for query in search_queries:
+        try:
+            payload = {"q": query, "num": 5}
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                if 'organic' in data:
+                    all_results['organic'].extend(data['organic'])
+        except Exception:
+            continue
+    
+    # 使用AI分析搜索结果
+    genai.configure(api_key=gemini_key)
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    
+    snippets = []
+    for result in all_results['organic'][:20]:
+        snippets.append(f"Title: {result.get('title', '')}\nSnippet: {result.get('snippet', '')}\nLink: {result.get('link', '')}")
+    
+    snippets_text = "\n\n".join(snippets) if snippets else "No search results found."
+    
+    prompt = f"""你是专业的B2B销售信息挖掘专家。请从搜索结果中找出公司 "{company_name}" 的邮箱信息。
+
+**任务：**
+1. 找出决策人姓名（CEO、创始人、老板、总监等）
+2. 推测或找出决策人的个人邮箱
+3. 找出公司通用邮箱（info@, contact@, hello@等）
+4. 从URL中提取公司域名
+
+**邮箱推测规则：**
+如果找到了决策人姓名（如John Smith）和公司域名（如example.com），请生成可能的邮箱：
+- john@example.com（最常用）
+- john.smith@example.com
+- jsmith@example.com
+- johnsmith@example.com
+
+**返回JSON格式：**
+{{
+    "decision_maker": "姓名（找不到就写Team）",
+    "decision_maker_title": "职位（如CEO, Founder等）",
+    "personal_email": "个人邮箱（最有可能的）",
+    "personal_email_alternatives": ["其他可能的个人邮箱"],
+    "generic_email": "公司通用邮箱",
+    "company_domain": "公司域名",
+    "confidence": "high/medium/low（邮箱准确度信心）"
+}}
+
+**搜索结果：**
+{snippets_text}
+
+请仔细分析并返回JSON。"""
+    
+    response = model.generate_content(prompt)
+    result = response.text.strip()
+    
+    if result.startswith("```"):
+        result = result.split("```")[1]
+        if result.startswith("json"):
+            result = result[4:]
+    result = result.strip()
+    
+    try:
+        email_data = json.loads(result)
+        # 确保有必要的字段
+        email_data.setdefault('decision_maker', 'Team')
+        email_data.setdefault('personal_email', '')
+        email_data.setdefault('generic_email', f"info@{company_name.lower().replace(' ', '')}.com")
+        email_data.setdefault('confidence', 'low')
+        return email_data
+    except:
+        return {
+            "decision_maker": "Team",
+            "decision_maker_title": "",
+            "personal_email": "",
+            "personal_email_alternatives": [],
+            "generic_email": f"info@{company_name.lower().replace(' ', '')}.com",
+            "company_domain": f"{company_name.lower().replace(' ', '')}.com",
+            "confidence": "low"
+        }
+
+def generate_personalized_cold_email(api_key: str, company_data: dict, product_services: str = None) -> dict:
+    """
+    根据公司痛点、切入点分析和产品服务生成高度个性化的开发信
+    """
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    
+    day_of_week = datetime.now().strftime("%A")
+    
+    # 构建详细的prompt
+    product_context = ""
+    if product_services:
+        product_context = f"""
+
+**我司产品/服务：**
+{product_services}
+"""
+    
+    strategy = company_data.get('strategy', '')
+    pain_point = company_data.get('pain_point', 'Standing out in competitive market')
+    product_recommendations = company_data.get('product_recommendations', [])
+    
+    prompt = f"""你是顶级的B2B冷邮件撰写专家，擅长写出高回复率的开发信。
+
+**邮件模板结构：**
+
+Subject: Hi {{Name}}, Happy {{Day}}! {{Emoji}} / {{与他们业务相关的钩子}}?
+
+Body:
+Hi {{Name}},
+
+Happy New Year! '{{Company Name}}' sounds like [基于业务类型的真诚赞美].
+
+I'm reaching out because [直击他们业务痛点的一句话].
+
+We help businesses like yours with:
+• [产品1]: [具体利益点]
+• [产品2]: [具体利益点]
+• [产品3]: [具体利益点]
+
+We offer low MOQs and fast turnaround. Want to see samples?
+
+[不要添加签名，签名会自动添加]
+
+**目标公司信息：**
+- 公司名：{company_data.get('company', 'Company')}
+- 决策人：{company_data.get('decision_maker', 'Team')}
+- 国家：{company_data.get('country', '')}
+- 行业：{company_data.get('industry', 'Business')}
+- 切入点分析：{strategy}
+- 痛点：{pain_point}
+- 推荐产品：{', '.join(product_recommendations) if product_recommendations else '定制品牌解决方案'}
+{product_context}
+- 今天是：{day_of_week}
+
+**写作要求：**
+1. 邮件要展示你深入了解他们的业务
+2. 直接点出切入点分析中提到的产品推荐
+3. 用痛点来建立共鸣
+4. 保持专业、简洁、有说服力
+5. 使用英文撰写
+
+请返回JSON格式：
+{{
+    "subject": "邮件主题",
+    "body": "邮件正文"
+}}"""
+    
+    response = model.generate_content(prompt)
+    
+    result = response.text.strip()
+    if result.startswith("```"):
+        result = result.split("```")[1]
+        if result.startswith("json"):
+            result = result[4:]
+    result = result.strip()
+    
+    try:
+        return json.loads(result)
+    except:
+        return {
+            "subject": f"Hi {company_data.get('decision_maker', 'Team')}, Happy {day_of_week}! ✨",
+            "body": f"Hi {company_data.get('decision_maker', 'Team')},\n\nI hope this email finds you well. I wanted to reach out about {company_data.get('company', 'your company')}..."
+        }
 
 def extract_companies_from_image(api_key: str, image_bytes: bytes) -> list:
     """Use Gemini vision to extract company names from screenshot."""
@@ -1482,17 +1794,17 @@ with st.sidebar:
 # MAIN CONTENT
 # ============================================
 st.markdown('<h1 class="main-header">📧 AI Email Marketing System</h1>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Upload → Extract → Research → Generate → Send</p>', unsafe_allow_html=True)
+st.markdown('<p class="sub-header">AI问答 → 搜索邮箱 → 生成开发信 → 自动发送</p>', unsafe_allow_html=True)
 
 # Progress indicator
 col1, col2, col3, col4, col5, col6 = st.columns(6)
 steps = [
-    ("1. Extract", st.session_state.companies is not None),
-    ("2. Research", st.session_state.research_data is not None),
-    ("3. Generate", st.session_state.emails is not None),
-    ("4. Send", st.session_state.send_results is not None),
-    ("5. Monitor", st.session_state.delivery_tracking is not None),
-    ("6. Archive", st.session_state.archive_data is not None)
+    ("1. 获取公司", st.session_state.companies is not None),
+    ("2. 搜索邮箱", st.session_state.research_data is not None),
+    ("3. 生成邮件", st.session_state.emails is not None),
+    ("4. 发送邮件", st.session_state.send_results is not None),
+    ("5. 退信监控", st.session_state.delivery_tracking is not None),
+    ("6. 数据归档", st.session_state.archive_data is not None)
 ]
 
 for col, (step_name, completed) in zip([col1, col2, col3, col4, col5, col6], steps):
@@ -1503,122 +1815,315 @@ for col, (step_name, completed) in zip([col1, col2, col3, col4, col5, col6], ste
 st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
 
 # ============================================
-# STEP 1: UPLOAD & EXTRACT
+# STEP 1: GET TARGET COMPANIES
 # ============================================
 st.markdown("""
 <div class="step-card">
     <div class="step-title">
         <span class="step-number">1</span>
-        Upload & Extract Companies
+        获取目标公司 Get Target Companies
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-screenshot_file = st.file_uploader(
-    "Upload Company List Screenshot",
-    type=['png', 'jpg', 'jpeg'],
-    key="screenshot_uploader",
-    help="Upload a screenshot containing company names"
+# 输入模式选择
+input_mode = st.radio(
+    "选择输入方式",
+    options=["ai_query", "screenshot"],
+    format_func=lambda x: "🤖 AI智能问答（推荐）" if x == "ai_query" else "📸 截图提取",
+    horizontal=True,
+    key="input_mode_radio",
+    help="AI智能问答可以直接提问获取目标公司列表，无需在其他平台操作"
 )
+st.session_state.input_mode = input_mode
 
-if screenshot_file:
-    col1, col2 = st.columns([1, 2])
+# ============================================
+# AI智能问答模式
+# ============================================
+if input_mode == "ai_query":
+    st.markdown("""
+    <div style="background: rgba(45, 139, 78, 0.1); padding: 15px; border-radius: 10px; margin: 15px 0; border: 1px solid rgba(45, 139, 78, 0.3);">
+        <div style="color: #2D8B4E; font-weight: bold; font-size: 1.1rem; margin-bottom: 10px;">
+            🎯 AI智能问答 - 直接获取目标公司
+        </div>
+        <div style="color: #E8D5B7; font-size: 0.9rem; line-height: 1.6;">
+            像在ChatGPT中一样提问，AI将帮你整理目标公司列表，包含行业分析和切入点建议。<br>
+            <b>示例问题：</b>"帮我整理20家荷兰的目标公司，主要推荐套装类产品组合，目标公司规模中小型即可"
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
     
-    with col1:
-        st.image(screenshot_file, caption="Uploaded Screenshot", use_container_width=True)
+    # 产品服务描述（可选）
+    with st.expander("📦 我司产品/服务描述（可选，帮助AI更精准推荐）", expanded=False):
+        product_services = st.text_area(
+            "描述你的产品或服务",
+            value=st.session_state.product_services or """U-MEKING是专业的定制品牌解决方案供应商，提供：
+- 定制礼盒套装（Kit/Set包装）
+- 环保材质包装袋（RPET、有机棉等）
+- 品牌周边产品（毛巾、围裙、束口袋等）
+- 促销赠品定制
+- 低MOQ、快速交货""",
+            height=120,
+            help="描述你的产品/服务，AI会根据这些信息推荐最匹配的目标客户"
+        )
+        st.session_state.product_services = product_services
     
-    with col2:
-        if st.button("🔍 Extract Companies", use_container_width=True):
-            if not gemini_key:
-                st.error("⚠️ Please enter your Gemini API Key in the sidebar.")
-            else:
-                with st.spinner("🤖 AI is reading the screenshot..."):
-                    try:
-                        screenshot_file.seek(0)
-                        image_bytes = screenshot_file.read()
-                        companies = extract_companies_from_image(gemini_key, image_bytes)
-                        st.session_state.companies = pd.DataFrame({
-                            "Company Name": companies,
-                            "Include": [True] * len(companies)
-                        })
-                        st.success(f"✅ Extracted {len(companies)} companies!")
-                    except Exception as e:
-                        st.error(f"❌ Error: {str(e)}")
-
-# Show extracted companies (editable)
-if st.session_state.companies is not None:
-    st.markdown("### 📋 Extracted Companies (Edit if needed)")
-    edited_df = st.data_editor(
-        st.session_state.companies,
-        use_container_width=True,
-        num_rows="dynamic",
-        column_config={
-            "Include": st.column_config.CheckboxColumn("Include", default=True)
-        }
+    # 用户问题输入
+    user_query = st.text_area(
+        "🔍 输入你的问题",
+        placeholder="例如：帮我整理20家荷兰的目标公司，主要推荐套装类产品组合，目标公司规模中小型即可，请剔除之前推荐过的Ace & Tate、MUD Jeans等公司",
+        height=100,
+        key="ai_query_input"
     )
+    
+    col_query, col_clear = st.columns([3, 1])
+    
+    with col_query:
+        if st.button("🚀 开始AI分析", use_container_width=True, type="primary"):
+            if not gemini_key:
+                st.error("⚠️ 请在侧边栏输入Gemini API Key")
+            elif not user_query.strip():
+                st.error("⚠️ 请输入你的问题")
+            else:
+                with st.spinner("🤖 AI正在分析并整理目标公司列表..."):
+                    try:
+                        # 第一步：获取AI回答
+                        ai_response = query_target_companies(
+                            gemini_key, 
+                            user_query, 
+                            st.session_state.product_services
+                        )
+                        st.session_state.ai_query_response = ai_response
+                        
+                        # 第二步：解析公司信息
+                        parsed_companies = parse_companies_from_ai_response(gemini_key, ai_response)
+                        st.session_state.ai_parsed_companies = parsed_companies
+                        
+                        if parsed_companies:
+                            # 转换为DataFrame格式
+                            companies_df = pd.DataFrame({
+                                "Company Name": [c.get('company', '') for c in parsed_companies],
+                                "Country": [c.get('country', '') for c in parsed_companies],
+                                "Industry": [c.get('industry', '') for c in parsed_companies],
+                                "Strategy": [c.get('strategy', '') for c in parsed_companies],
+                                "Include": [True] * len(parsed_companies)
+                            })
+                            st.session_state.companies = companies_df
+                            st.success(f"✅ 成功解析 {len(parsed_companies)} 家目标公司！")
+                        else:
+                            st.warning("⚠️ 未能解析出公司信息，请查看AI回答并手动提取")
+                        
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ 分析失败: {str(e)}")
+    
+    with col_clear:
+        if st.button("🔄 清除", use_container_width=True):
+            st.session_state.ai_query_response = None
+            st.session_state.ai_parsed_companies = None
+            st.rerun()
+    
+    # 显示AI回答
+    if st.session_state.ai_query_response:
+        with st.expander("📝 AI原始回答（点击展开查看完整内容）", expanded=False):
+            st.markdown(f"""
+            <div style="background: rgba(26, 37, 64, 0.6); padding: 15px; border-radius: 8px; 
+                        max-height: 400px; overflow-y: auto; font-size: 0.9rem; line-height: 1.6;">
+                {st.session_state.ai_query_response.replace(chr(10), '<br>')}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # 复制到剪贴板按钮
+            st.download_button(
+                label="📋 下载AI回答",
+                data=st.session_state.ai_query_response,
+                file_name=f"ai_response_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
+                mime="text/plain"
+            )
+
+# ============================================
+# 截图提取模式
+# ============================================
+else:
+    st.markdown("""
+    <div style="background: rgba(201, 162, 39, 0.1); padding: 12px; border-radius: 8px; margin: 15px 0; border: 1px solid rgba(201, 162, 39, 0.3);">
+        <span style="color: #C9A227;">📸 截图提取模式：</span>
+        <span style="color: #E8D5B7;">上传包含公司列表的截图，AI会自动识别并提取公司名称。</span>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    screenshot_file = st.file_uploader(
+        "Upload Company List Screenshot",
+        type=['png', 'jpg', 'jpeg'],
+        key="screenshot_uploader",
+        help="Upload a screenshot containing company names"
+    )
+
+    if screenshot_file:
+        col1, col2 = st.columns([1, 2])
+        
+        with col1:
+            st.image(screenshot_file, caption="Uploaded Screenshot", use_container_width=True)
+        
+        with col2:
+            if st.button("🔍 Extract Companies", use_container_width=True):
+                if not gemini_key:
+                    st.error("⚠️ Please enter your Gemini API Key in the sidebar.")
+                else:
+                    with st.spinner("🤖 AI is reading the screenshot..."):
+                        try:
+                            screenshot_file.seek(0)
+                            image_bytes = screenshot_file.read()
+                            companies = extract_companies_from_image(gemini_key, image_bytes)
+                            st.session_state.companies = pd.DataFrame({
+                                "Company Name": companies,
+                                "Include": [True] * len(companies)
+                            })
+                            st.success(f"✅ Extracted {len(companies)} companies!")
+                        except Exception as e:
+                            st.error(f"❌ Error: {str(e)}")
+
+# 显示提取/解析的公司列表（可编辑）
+if st.session_state.companies is not None:
+    st.markdown("### 📋 目标公司列表 (可编辑)")
+    
+    # 根据输入模式显示不同的列配置
+    if input_mode == "ai_query" and 'Strategy' in st.session_state.companies.columns:
+        edited_df = st.data_editor(
+            st.session_state.companies,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                "Company Name": st.column_config.TextColumn("公司名", width="medium"),
+                "Country": st.column_config.TextColumn("国别", width="small"),
+                "Industry": st.column_config.TextColumn("行业", width="small"),
+                "Strategy": st.column_config.TextColumn("切入点分析", width="large"),
+                "Include": st.column_config.CheckboxColumn("Include", default=True)
+            }
+        )
+    else:
+        edited_df = st.data_editor(
+            st.session_state.companies,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                "Include": st.column_config.CheckboxColumn("Include", default=True)
+            }
+        )
     st.session_state.companies = edited_df
+    
+    # 统计信息
+    included_count = len(st.session_state.companies[st.session_state.companies['Include'] == True])
+    st.info(f"📊 已选择 **{included_count}** 家公司进行下一步研究")
 
 st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
 
 # ============================================
-# STEP 2: RESEARCH
+# STEP 2: RESEARCH DECISION MAKERS & EMAILS
 # ============================================
 st.markdown("""
 <div class="step-card">
     <div class="step-title">
         <span class="step-number">2</span>
-        Research Decision Makers
+        搜索决策人邮箱 Research Decision Makers
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 if st.session_state.companies is not None:
-    included_companies = st.session_state.companies[st.session_state.companies['Include'] == True]['Company Name'].tolist()
-    st.info(f"📊 {len(included_companies)} companies selected for research")
+    included_df = st.session_state.companies[st.session_state.companies['Include'] == True]
+    included_companies = included_df['Company Name'].tolist()
     
-    if st.button("🔎 Research All Companies", use_container_width=True):
+    # 检查是否有AI问答模式的额外信息
+    has_ai_data = 'Country' in included_df.columns and 'Strategy' in included_df.columns
+    
+    if has_ai_data:
+        st.markdown("""
+        <div style="background: rgba(45, 139, 78, 0.1); padding: 12px; border-radius: 8px; margin: 10px 0; border: 1px solid rgba(45, 139, 78, 0.3);">
+            <span style="color: #2D8B4E;">✨ AI智能模式：</span>
+            <span style="color: #E8D5B7;">已获取公司切入点分析，将使用增强搜索策略查找决策人邮箱，并结合分析生成高质量开发信。</span>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.info(f"📊 已选择 **{len(included_companies)}** 家公司进行决策人搜索")
+    
+    if st.button("🔎 搜索决策人邮箱", use_container_width=True, type="primary"):
         if not gemini_key or not serper_key:
-            st.error("⚠️ Please enter both API keys in the sidebar.")
+            st.error("⚠️ 请在侧边栏输入Gemini API Key和Serper API Key")
         else:
             research_results = []
             progress_bar = st.progress(0)
             status_text = st.empty()
+            detail_text = st.empty()
             
             for i, company in enumerate(included_companies):
-                status_text.text(f"🔍 Researching: {company}...")
+                status_text.text(f"🔍 正在搜索: {company}... ({i+1}/{len(included_companies)})")
                 progress_bar.progress((i + 1) / len(included_companies))
                 
+                # 获取AI问答模式的额外信息
+                company_row = included_df[included_df['Company Name'] == company].iloc[0] if has_ai_data else None
+                country = company_row.get('Country', '') if company_row is not None else ''
+                industry = company_row.get('Industry', 'Business') if company_row is not None else 'Business'
+                strategy = company_row.get('Strategy', '') if company_row is not None else ''
+                
                 try:
-                    # Search for company info with multiple queries
-                    search_results = search_company_info(serper_key, company)
+                    detail_text.text(f"   📧 搜索邮箱信息...")
                     
-                    # Analyze with AI - now returns personal + generic emails
-                    analysis = analyze_company_with_ai(gemini_key, company, search_results)
+                    # 使用增强的邮箱搜索
+                    email_data = search_decision_maker_emails(serper_key, gemini_key, company, country)
+                    
+                    # 从策略中提取痛点和产品推荐
+                    pain_point = email_data.get('pain_point', 'Standing out in competitive market')
+                    product_recommendations = []
+                    
+                    # 如果有AI分析的策略信息，从中提取
+                    if strategy:
+                        # 解析策略中的产品推荐
+                        if st.session_state.ai_parsed_companies:
+                            for pc in st.session_state.ai_parsed_companies:
+                                if pc.get('company') == company:
+                                    pain_point = pc.get('pain_point', pain_point)
+                                    product_recommendations = pc.get('product_recommendations', [])
+                                    break
                     
                     research_results.append({
                         'company': company,
-                        'decision_maker': analysis.get('decision_maker', 'Team'),
-                        'personal_email': analysis.get('personal_email', ''),
-                        'generic_email': analysis.get('generic_email', f"info@{company.lower().replace(' ', '')}.com"),
-                        'email': analysis.get('email', f"info@{company.lower().replace(' ', '')}.com"),
-                        'business_type': analysis.get('business_type', 'Business'),
-                        'pain_point': analysis.get('pain_point', 'Standing out in a competitive market')
+                        'country': country,
+                        'industry': industry,
+                        'strategy': strategy,
+                        'decision_maker': email_data.get('decision_maker', 'Team'),
+                        'decision_maker_title': email_data.get('decision_maker_title', ''),
+                        'personal_email': email_data.get('personal_email', ''),
+                        'generic_email': email_data.get('generic_email', f"info@{company.lower().replace(' ', '')}.com"),
+                        'email': email_data.get('personal_email') or email_data.get('generic_email', f"info@{company.lower().replace(' ', '')}.com"),
+                        'email_confidence': email_data.get('confidence', 'low'),
+                        'business_type': industry,
+                        'pain_point': pain_point,
+                        'product_recommendations': product_recommendations
                     })
+                    
                 except Exception as e:
                     research_results.append({
                         'company': company,
+                        'country': country,
+                        'industry': industry,
+                        'strategy': strategy,
                         'decision_maker': 'Team',
+                        'decision_maker_title': '',
                         'personal_email': '',
                         'generic_email': f"info@{company.lower().replace(' ', '')}.com",
                         'email': f"info@{company.lower().replace(' ', '')}.com",
-                        'business_type': 'Business',
-                        'pain_point': 'Standing out in a competitive market'
+                        'email_confidence': 'low',
+                        'business_type': industry or 'Business',
+                        'pain_point': 'Standing out in competitive market',
+                        'product_recommendations': []
                     })
             
             st.session_state.research_data = pd.DataFrame(research_results)
             status_text.empty()
+            detail_text.empty()
             progress_bar.empty()
-            st.success("✅ Research completed!")
+            st.success(f"✅ 决策人研究完成！共找到 {len(research_results)} 家公司的联系信息")
             st.rerun()
 
 # Show research results (editable)
@@ -1674,29 +2179,44 @@ if st.session_state.research_data is not None:
 st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
 
 # ============================================
-# STEP 3: GENERATE EMAILS
+# STEP 3: GENERATE PERSONALIZED COLD EMAILS
 # ============================================
 st.markdown("""
 <div class="step-card">
     <div class="step-title">
         <span class="step-number">3</span>
-        Generate Cold Emails
+        生成个性化开发信 Generate Cold Emails
     </div>
 </div>
 """, unsafe_allow_html=True)
 
 if st.session_state.research_data is not None:
-    if st.button("✍️ Generate All Emails", use_container_width=True):
+    # 检查是否有切入点分析数据
+    has_strategy = 'strategy' in st.session_state.research_data.columns
+    
+    if has_strategy:
+        st.markdown("""
+        <div style="background: rgba(45, 139, 78, 0.1); padding: 12px; border-radius: 8px; margin: 10px 0; border: 1px solid rgba(45, 139, 78, 0.3);">
+            <span style="color: #2D8B4E;">✨ 智能邮件模式：</span>
+            <span style="color: #E8D5B7;">将根据每家公司的切入点分析、痛点和推荐产品生成高度个性化的开发信。</span>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    if st.button("✍️ 生成所有邮件", use_container_width=True, type="primary"):
         if not gemini_key:
-            st.error("⚠️ Please enter your Gemini API Key in the sidebar.")
+            st.error("⚠️ 请在侧边栏输入Gemini API Key")
         else:
             emails = []
             progress_bar = st.progress(0)
             status_text = st.empty()
+            detail_text = st.empty()
+            
+            total_rows = len(st.session_state.research_data)
             
             for i, row in st.session_state.research_data.iterrows():
-                status_text.text(f"✍️ Writing email for: {row['company']}...")
-                progress_bar.progress((i + 1) / len(st.session_state.research_data))
+                company_name = row['company']
+                status_text.text(f"✍️ 正在为 {company_name} 撰写邮件... ({i+1}/{total_rows})")
+                progress_bar.progress((i + 1) / total_rows)
                 
                 # 收集需要发送的邮箱地址
                 target_emails = []
@@ -1723,37 +2243,66 @@ if st.session_state.research_data is not None:
                     continue
                 
                 try:
-                    email_content = generate_cold_email(gemini_key, row.to_dict())
+                    # 构建公司数据，包含切入点分析
+                    company_data = row.to_dict()
+                    
+                    # 如果有product_recommendations列但是是字符串，转为列表
+                    if 'product_recommendations' in company_data:
+                        pr = company_data['product_recommendations']
+                        if isinstance(pr, str):
+                            try:
+                                company_data['product_recommendations'] = json.loads(pr) if pr.startswith('[') else []
+                            except:
+                                company_data['product_recommendations'] = []
+                    
+                    detail_text.text(f"   🎯 分析切入点并生成个性化内容...")
+                    
+                    # 使用增强的邮件生成函数
+                    email_content = generate_personalized_cold_email(
+                        gemini_key, 
+                        company_data, 
+                        st.session_state.product_services
+                    )
+                    
                     # Append signature to the email body
                     full_body = email_content['body'].rstrip() + EMAIL_SIGNATURE
                     
                     # 为每个目标邮箱创建一封邮件
                     for target in target_emails:
                         emails.append({
-                            'company': row['company'],
+                            'company': company_name,
+                            'country': row.get('country', ''),
+                            'industry': row.get('industry', row.get('business_type', '')),
                             'to_email': target['email'],
                             'email_type': target['type'],
                             'decision_maker': row['decision_maker'],
                             'subject': email_content['subject'],
-                            'body': full_body
+                            'body': full_body,
+                            'strategy': row.get('strategy', ''),
+                            'pain_point': row.get('pain_point', '')
                         })
                 except Exception as e:
                     # Fallback email with signature
                     fallback_body = f"Hi {row['decision_maker']},\n\nI wanted to reach out about {row['company']}..." + EMAIL_SIGNATURE
                     for target in target_emails:
                         emails.append({
-                            'company': row['company'],
+                            'company': company_name,
+                            'country': row.get('country', ''),
+                            'industry': row.get('industry', row.get('business_type', '')),
                             'to_email': target['email'],
                             'email_type': target['type'],
                             'decision_maker': row['decision_maker'],
                             'subject': f"Hi {row['decision_maker']}, Quick Question! ✨",
-                            'body': fallback_body
+                            'body': fallback_body,
+                            'strategy': row.get('strategy', ''),
+                            'pain_point': row.get('pain_point', '')
                         })
             
             st.session_state.emails = emails
             status_text.empty()
+            detail_text.empty()
             progress_bar.empty()
-            st.success(f"✅ Generated {len(emails)} emails!")
+            st.success(f"✅ 成功生成 {len(emails)} 封个性化开发信！")
             st.rerun()
 
 # Show generated emails
