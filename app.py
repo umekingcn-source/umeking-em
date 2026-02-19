@@ -474,7 +474,143 @@ section[data-testid="stSidebar"] span {
 [data-testid="column-header"] {
     color: #C9A227 !important;
 }
+
+/* 保活状态指示器 */
+.keep-alive-indicator {
+    position: fixed;
+    bottom: 10px;
+    right: 10px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #2D8B4E;
+    animation: pulse 2s infinite;
+    z-index: 9999;
+}
+
+@keyframes pulse {
+    0% { opacity: 1; box-shadow: 0 0 0 0 rgba(45, 139, 78, 0.7); }
+    50% { opacity: 0.7; box-shadow: 0 0 0 5px rgba(45, 139, 78, 0); }
+    100% { opacity: 1; box-shadow: 0 0 0 0 rgba(45, 139, 78, 0); }
+}
 </style>
+""", unsafe_allow_html=True)
+
+# ============================================
+# 🔄 页面保活机制 - 防止后台运行时断开
+# ============================================
+st.markdown("""
+<script>
+// 页面保活机制 - 防止浏览器休眠导致连接断开
+
+// 1. 定期发送心跳保持连接活跃
+let keepAliveInterval = null;
+let lastActivity = Date.now();
+
+function startKeepAlive() {
+    if (keepAliveInterval) return;
+    
+    keepAliveInterval = setInterval(() => {
+        // 模拟用户活动，防止页面休眠
+        const event = new MouseEvent('mousemove', {
+            bubbles: true,
+            cancelable: true,
+            clientX: Math.random() * 10,
+            clientY: Math.random() * 10
+        });
+        document.dispatchEvent(event);
+        
+        // 更新活动时间
+        lastActivity = Date.now();
+        
+        // 控制台记录保活状态
+        console.log('[KeepAlive] 心跳 - ' + new Date().toLocaleTimeString());
+    }, 30000); // 每30秒一次心跳
+    
+    console.log('[KeepAlive] 页面保活已启动');
+}
+
+// 2. 防止页面休眠 - 使用 Wake Lock API (如果支持)
+async function requestWakeLock() {
+    if ('wakeLock' in navigator) {
+        try {
+            const wakeLock = await navigator.wakeLock.request('screen');
+            console.log('[WakeLock] 屏幕唤醒锁已激活');
+            
+            // 页面可见性变化时重新获取
+            document.addEventListener('visibilitychange', async () => {
+                if (document.visibilityState === 'visible') {
+                    await navigator.wakeLock.request('screen');
+                    console.log('[WakeLock] 重新激活屏幕唤醒锁');
+                }
+            });
+        } catch (err) {
+            console.log('[WakeLock] 无法激活: ' + err.message);
+        }
+    }
+}
+
+// 3. 页面可见性变化处理
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+        console.log('[Visibility] 页面回到前台');
+        // 页面回到前台时，检查是否需要刷新
+        const idleTime = Date.now() - lastActivity;
+        if (idleTime > 5 * 60 * 1000) { // 超过5分钟
+            console.log('[Visibility] 检测到长时间后台，建议刷新页面');
+        }
+        lastActivity = Date.now();
+    } else {
+        console.log('[Visibility] 页面进入后台');
+    }
+});
+
+// 4. 防止移动端浏览器休眠 - 播放无声音频
+function preventMobileSleep() {
+    // 创建一个无声的音频上下文
+    try {
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+        
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+        gainNode.gain.value = 0; // 静音
+        oscillator.frequency.value = 1; // 最低频率
+        oscillator.start();
+        
+        // 每隔一段时间恢复音频上下文（某些浏览器会暂停）
+        setInterval(() => {
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }, 10000);
+        
+        console.log('[Audio] 防休眠音频已启动');
+    } catch (e) {
+        console.log('[Audio] 防休眠音频启动失败: ' + e.message);
+    }
+}
+
+// 启动所有保活机制
+startKeepAlive();
+requestWakeLock();
+
+// 移动端检测
+if (/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)) {
+    preventMobileSleep();
+    console.log('[Mobile] 检测到移动设备，已启用额外保活机制');
+}
+
+// 添加保活指示器
+const indicator = document.createElement('div');
+indicator.className = 'keep-alive-indicator';
+indicator.title = '页面保活中';
+document.body.appendChild(indicator);
+</script>
+
+<!-- 保活指示器（备用，防止JS未执行时显示） -->
+<div class="keep-alive-indicator" title="页面保活中"></div>
 """, unsafe_allow_html=True)
 
 # ============================================
@@ -759,6 +895,67 @@ def format_sent_companies_for_ai():
     
     return result
 
+def get_sent_company_names_set():
+    """
+    获取所有已发送公司名称的集合（用于快速去重检查）
+    返回小写的公司名称集合，便于不区分大小写的比较
+    """
+    sent_companies = get_all_sent_companies()
+    return {c['company'].strip().lower() for c in sent_companies}
+
+def is_company_already_sent(company_name: str) -> bool:
+    """
+    检查公司是否已经发送过邮件
+    不区分大小写，去除前后空格
+    """
+    if not company_name:
+        return False
+    sent_names = get_sent_company_names_set()
+    return company_name.strip().lower() in sent_names
+
+def filter_unsent_companies(companies_df, show_filtered: bool = True):
+    """
+    从公司列表中过滤掉已发送过的公司
+    返回：(过滤后的DataFrame, 被过滤的公司列表)
+    """
+    if companies_df is None or companies_df.empty:
+        return companies_df, []
+    
+    sent_names = get_sent_company_names_set()
+    filtered_companies = []
+    keep_indices = []
+    
+    for idx, row in companies_df.iterrows():
+        company_name = row.get('Company Name', '').strip()
+        if company_name.lower() in sent_names:
+            filtered_companies.append(company_name)
+        else:
+            keep_indices.append(idx)
+    
+    filtered_df = companies_df.loc[keep_indices].reset_index(drop=True)
+    return filtered_df, filtered_companies
+
+def filter_unsent_emails(emails_list):
+    """
+    从邮件列表中过滤掉已发送过的公司邮件
+    返回：(过滤后的邮件列表, 被过滤的邮件列表)
+    """
+    if not emails_list:
+        return emails_list, []
+    
+    sent_names = get_sent_company_names_set()
+    filtered_emails = []
+    keep_emails = []
+    
+    for email in emails_list:
+        company_name = email.get('company', '').strip()
+        if company_name.lower() in sent_names:
+            filtered_emails.append(email)
+        else:
+            keep_emails.append(email)
+    
+    return keep_emails, filtered_emails
+
 # ============================================
 # INITIALIZE SESSION STATE
 # ============================================
@@ -807,6 +1004,17 @@ if 'current_history_file' not in st.session_state:
 # 已发送公司数据库
 if 'sent_companies_db' not in st.session_state:
     st.session_state.sent_companies_db = None  # 已发送公司汇总
+# 🚀 一键自动化相关
+if 'auto_mode' not in st.session_state:
+    st.session_state.auto_mode = False  # 是否处于一键自动化模式
+if 'auto_step' not in st.session_state:
+    st.session_state.auto_step = 0  # 当前自动化步骤 (0=未开始, 1=获取公司, 2=搜索邮箱, 3=生成邮件, 4=发送)
+if 'auto_query' not in st.session_state:
+    st.session_state.auto_query = None  # 一键操作的查询内容
+if 'auto_send_enabled' not in st.session_state:
+    st.session_state.auto_send_enabled = False  # 是否自动发送（需要用户确认）
+if 'auto_resume_sending' not in st.session_state:
+    st.session_state.auto_resume_sending = False  # 是否自动恢复发送中断的任务
 
 # ============================================
 # TIMEZONE CONSTANTS
@@ -926,11 +1134,44 @@ def query_target_companies(api_key: str, user_query: str, product_services: str 
 - 美妆护肤：化妆包、发带、收纳袋
 - 单车/骑行：反光配件、骑行包、工具卡
 
+# ⚠️ 公司规模筛选标准（非常重要！）
+
+**必须严格遵守以下规模限制：**
+
+✅ **推荐的公司类型：**
+- 员工人数：50人以下的小型企业
+- 独立经营的本地店铺/工作室/精品店
+- 创始人/老板亲自管理的公司
+- 小型连锁（2-5家店）
+- 家族企业、夫妻店
+- 独立设计师品牌
+- 本地工坊/手工作坊
+- 新创企业/初创公司
+- 独立咖啡馆/餐厅（非连锁）
+- 精品健身房/瑜伽工作室
+- 独立珠宝店/眼镜店
+
+❌ **绝对不要推荐的公司：**
+- 知名大型品牌（如Nike、Starbucks、H&M、Zara等）
+- 上市公司或大型集团
+- 跨国连锁企业
+- 员工超过50人的公司
+- 需要多层审批的大型企业
+- 国际知名零售商
+- 大型百货商店
+
+**为什么选择小公司：**
+- 决策链条短，老板直接拍板
+- 沟通效率高，无需层层汇报
+- 对定制服务需求更迫切
+- 预算灵活，订单周期短
+- 更看重供应商的服务和灵活性
+
 **重要说明：**
-- 推荐中小型企业，决策链条短，更容易合作
 - 每家公司都要有明确的切入点和产品推荐
 - 公司名称使用英文原名
-- 分析内容要具体、可操作"""
+- 分析内容要具体、可操作
+- 优先推荐能在Google/LinkedIn上找到老板联系方式的小公司"""
 
     if product_services:
         system_prompt += f"""
@@ -1009,6 +1250,7 @@ def search_decision_maker_emails(serper_key: str, gemini_key: str, company_name:
     """
     搜索公司决策人邮箱，包括个人邮箱和公司通用邮箱
     使用多种搜索策略来提高找到邮箱的概率
+    🔥 增强版：更深度搜索决策人姓名和个人邮箱
     """
     url = "https://google.serper.dev/search"
     headers = {
@@ -1016,18 +1258,99 @@ def search_decision_maker_emails(serper_key: str, gemini_key: str, company_name:
         'Content-Type': 'application/json'
     }
     
-    # 多种搜索策略
+    # ============================================
+    # 🔥 超强搜索策略 - 多维度深度搜索决策人
+    # ============================================
+    
+    # 智能提取公司域名（处理各种公司名格式）
+    company_clean = company_name.lower()
+    # 移除常见后缀
+    for suffix in [' inc', ' inc.', ' llc', ' ltd', ' ltd.', ' gmbh', ' bv', ' b.v.', ' co', ' co.', ' corp', ' corporation', ' limited', ' group', ' holding', ' holdings']:
+        company_clean = company_clean.replace(suffix, '')
+    company_domain_guess = company_clean.replace(" ", "").replace("-", "").replace("&", "and").replace("'", "").replace(".", "")
+    
+    # 处理带空格的域名猜测
+    company_domain_hyphen = company_clean.replace(" ", "-").replace("&", "and").replace("'", "").replace(".", "")
+    
+    # 国家特定域名后缀
+    country_tld_map = {
+        'netherlands': '.nl', 'nl': '.nl', 'dutch': '.nl',
+        'germany': '.de', 'de': '.de', 'german': '.de',
+        'uk': '.co.uk', 'united kingdom': '.co.uk', 'england': '.co.uk', 'british': '.co.uk',
+        'france': '.fr', 'french': '.fr',
+        'spain': '.es', 'spanish': '.es',
+        'italy': '.it', 'italian': '.it',
+        'belgium': '.be', 'belgian': '.be',
+        'australia': '.com.au', 'australian': '.com.au',
+        'canada': '.ca', 'canadian': '.ca',
+        'usa': '.com', 'us': '.com', 'america': '.com', 'american': '.com',
+    }
+    country_tld = country_tld_map.get(country.lower(), '.com') if country else '.com'
+    
     search_queries = [
-        # 决策人搜索
-        f'"{company_name}" CEO OR founder OR owner email contact {country}',
-        # 公司官网联系方式
-        f'"{company_name}" contact us email site:{company_name.lower().replace(" ", "")}.com OR site:{company_name.lower().replace(" ", "")}.nl OR site:{company_name.lower().replace(" ", "")}.co',
-        # LinkedIn搜索决策人
-        f'site:linkedin.com "{company_name}" CEO OR founder OR owner {country}',
-        # 邮箱格式搜索
-        f'"{company_name}" "@" email contact info hello',
-        # Hunter.io等邮箱数据库
-        f'"{company_name}" email format pattern',
+        # ===== 第一层：LinkedIn深度搜索（最有价值的决策人来源）=====
+        f'site:linkedin.com/in "{company_name}" CEO founder owner managing director {country}',
+        f'site:linkedin.com/in "{company_name}" president chief executive officer',
+        f'site:linkedin.com/in "{company_name}" eigenaar oprichter directeur',  # 荷兰语：老板/创始人/经理
+        f'site:linkedin.com/company "{company_name}" about',
+        
+        # ===== 第二层：公司官网团队页面 =====
+        f'"{company_name}" "our team" OR "meet the team" OR "about us" OR "leadership" {country}',
+        f'"{company_name}" founder CEO owner "email" OR "@"',
+        f'site:{company_domain_guess}.com OR site:{company_domain_guess}{country_tld} team about contact',
+        f'site:{company_domain_hyphen}.com team OR about OR contact',
+        
+        # ===== 第三层：邮箱格式发现 =====
+        f'"{company_name}" "@{company_domain_guess}" email',
+        f'"{company_domain_guess}.com" OR "{company_domain_guess}{country_tld}" email CEO founder owner',
+        f'intext:"@{company_domain_guess}.com" OR intext:"@{company_domain_guess}{country_tld}"',
+        
+        # ===== 第四层：商业数据库搜索 =====
+        f'site:crunchbase.com "{company_name}"',
+        f'site:zoominfo.com "{company_name}"',
+        f'site:apollo.io "{company_name}"',
+        f'site:rocketreach.co "{company_name}"',
+        f'site:leadiq.com "{company_name}"',
+        f'site:hunter.io "@{company_domain_guess}"',
+        
+        # ===== 第五层：新闻和媒体报道 =====
+        f'"{company_name}" CEO OR founder announced OR interview OR "said" OR "stated" {country}',
+        f'"{company_name}" "founded by" OR "led by" OR "owned by"',
+        
+        # ===== 第六层：公司注册信息 =====
+        f'"{company_name}" director registration company {country}',
+        f'"{company_name}" kvk OR "chamber of commerce" OR "company house" owner director',
+        
+        # ===== 第七层：社交媒体 =====
+        f'site:twitter.com OR site:x.com "{company_name}" CEO founder owner',
+        f'site:facebook.com/pages "{company_name}" about',
+        
+        # ===== 第八层：行业目录和B2B平台 =====
+        f'"{company_name}" contact email buyer seller {country}',
+        f'"{company_name}" wholesale OR distribution OR supplier contact',
+        
+        # ===== 🔥 第九层：小型企业专属搜索（老板信息更公开）=====
+        # Instagram商业账户（小店老板常用）
+        f'site:instagram.com "{company_name}" {country}',
+        # Google商家信息
+        f'"{company_name}" "google my business" OR "google maps" owner {country}',
+        # Yelp/TripAdvisor商家信息
+        f'site:yelp.com OR site:tripadvisor.com "{company_name}" owner',
+        # 本地商业目录（荷兰、欧洲）
+        f'site:detelefoongids.nl OR site:goudengids.nl "{company_name}"',  # 荷兰黄页
+        f'site:europages.com OR site:kompass.com "{company_name}"',  # 欧洲B2B目录
+        # Shopify/独立电商店主
+        f'"{company_name}" shopify OR "powered by shopify" owner founder',
+        # Etsy卖家（手工艺品店主）
+        f'site:etsy.com/shop "{company_name}"',
+        # 当地新闻/采访（小企业老板常接受采访）
+        f'"{company_name}" interview OR "talks to" OR "speaks with" owner founder {country}',
+        # 创业故事
+        f'"{company_name}" "started by" OR "launched by" OR "established by" {country}',
+        # 行业协会/商会成员
+        f'"{company_name}" member association OR chamber {country}',
+        # 公司简介页面
+        f'"{company_name}" "about us" "I started" OR "we started" OR "my passion"',
     ]
     
     all_results = {
@@ -1035,9 +1358,10 @@ def search_decision_maker_emails(serper_key: str, gemini_key: str, company_name:
         'queries_used': search_queries
     }
     
+    # 执行所有搜索查询
     for query in search_queries:
         try:
-            payload = {"q": query, "num": 5}
+            payload = {"q": query, "num": 15}  # 每个查询获取15个结果
             response = requests.post(url, headers=headers, json=payload, timeout=30)
             
             if response.status_code == 200:
@@ -1047,46 +1371,110 @@ def search_decision_maker_emails(serper_key: str, gemini_key: str, company_name:
         except Exception:
             continue
     
-    # 使用AI分析搜索结果
+    # 去重搜索结果（根据URL）
+    seen_urls = set()
+    unique_results = []
+    for result in all_results['organic']:
+        url = result.get('link', '')
+        if url not in seen_urls:
+            seen_urls.add(url)
+            unique_results.append(result)
+    all_results['organic'] = unique_results
+    
+    # ============================================
+    # 🔥 超强AI分析 - 深度挖掘决策人个人邮箱
+    # ============================================
     genai.configure(api_key=gemini_key)
     model = genai.GenerativeModel('gemini-2.0-flash')
     
+    # 准备搜索结果摘要，增加到80条
     snippets = []
-    for result in all_results['organic'][:20]:
+    for result in all_results['organic'][:80]:
         snippets.append(f"Title: {result.get('title', '')}\nSnippet: {result.get('snippet', '')}\nLink: {result.get('link', '')}")
     
     snippets_text = "\n\n".join(snippets) if snippets else "No search results found."
     
-    prompt = f"""你是专业的B2B销售信息挖掘专家。请从搜索结果中找出公司 "{company_name}" 的邮箱信息。
+    prompt = f"""你是全球顶级的B2B销售信息挖掘专家，专门负责找到公司决策人的真实姓名和个人邮箱。
 
-**任务：**
-1. 找出决策人姓名（CEO、创始人、老板、总监等）
-2. 推测或找出决策人的个人邮箱
-3. 找出公司通用邮箱（info@, contact@, hello@等）
-4. 从URL中提取公司域名
+**目标公司：** "{company_name}"
+**目标国家/地区：** {country if country else "全球"}
+**推测的公司域名：** {company_domain_guess}.com 或 {company_domain_guess}{country_tld}
 
-**邮箱推测规则：**
-如果找到了决策人姓名（如John Smith）和公司域名（如example.com），请生成可能的邮箱：
-- john@example.com（最常用）
-- john.smith@example.com
-- jsmith@example.com
-- johnsmith@example.com
+# 🔥 核心任务：找到决策人姓名和个人邮箱（不要返回通用邮箱！）
 
-**返回JSON格式：**
+## 第一步：从搜索结果中提取决策人姓名
+
+仔细检查以下线索来源：
+1. **LinkedIn页面** - 标题格式通常是 "Name - Title at Company"
+   - 例如: "John Smith - CEO at ABC Company | LinkedIn" → 决策人是 John Smith
+2. **Crunchbase/ZoomInfo** - 直接显示创始人/CEO姓名
+3. **新闻报道** - "ABC公司的创始人John Smith表示..."
+4. **公司About页面** - "Founded by John Smith in 2010"
+5. **公司注册信息** - "Director: John Smith"
+
+## 第二步：提取公司真实域名
+
+从搜索结果的URL中提取：
+- 如果看到 "https://abccompany.nl/contact" → 域名是 abccompany.nl
+- 如果看到 "site:example.com" → 域名是 example.com
+- 优先使用在搜索结果中实际出现的域名
+
+## 第三步：生成个人邮箱（这是最重要的步骤！）
+
+**即使搜索结果中没有直接显示邮箱，你也必须根据姓名和域名推测！**
+
+假设找到决策人 "John Smith" 和域名 "abccompany.nl"：
+
+**个人邮箱生成规则（按可能性排序）：**
+1. john@abccompany.nl （首选 - 最常见格式）
+2. j.smith@abccompany.nl
+3. john.smith@abccompany.nl
+4. jsmith@abccompany.nl
+5. johnsmith@abccompany.nl
+6. smith@abccompany.nl
+
+**荷兰/欧洲公司常见邮箱格式：**
+- 首名@域名（如 jan@company.nl）
+- 首字母.姓@域名（如 j.devries@company.nl）
+- 名.姓@域名（如 jan.devries@company.nl）
+
+## 必须返回的JSON格式：
+
+```json
 {{
-    "decision_maker": "姓名（找不到就写Team）",
-    "decision_maker_title": "职位（如CEO, Founder等）",
-    "personal_email": "个人邮箱（最有可能的）",
-    "personal_email_alternatives": ["其他可能的个人邮箱"],
-    "generic_email": "公司通用邮箱",
-    "company_domain": "公司域名",
-    "confidence": "high/medium/low（邮箱准确度信心）"
+    "decision_maker": "John Smith（必须是真实全名，不是Team或公司名）",
+    "decision_maker_title": "CEO / Founder / Owner / Managing Director",
+    "personal_email": "john@abccompany.nl（首选的个人邮箱推测）",
+    "personal_email_alternatives": [
+        "j.smith@abccompany.nl",
+        "john.smith@abccompany.nl",
+        "jsmith@abccompany.nl"
+    ],
+    "generic_email": "info@abccompany.nl（作为备选）",
+    "company_domain": "abccompany.nl（从URL中提取的真实域名）",
+    "company_website": "https://www.abccompany.nl",
+    "confidence": "high/medium/low",
+    "source_hints": "从LinkedIn/Crunchbase/新闻等哪里找到的姓名信息"
 }}
+```
 
-**搜索结果：**
+## ⚠️ 严格要求：
+
+1. **必须尽最大努力找到真实姓名** - 即使是很小的线索也要利用
+2. **personal_email 必须是个人邮箱格式** - 如 john@domain.com，绝不能是 info@、contact@、hello@
+3. **如果找到姓名就必须生成邮箱推测** - 不要说"未找到"
+4. **alternatives 必须提供至少3个变体** - 增加命中概率
+5. **只有完全无法找到任何姓名线索时** - 才允许 decision_maker 为 "Team"
+
+---
+
+**搜索结果（请仔细分析每一条，特别是LinkedIn和Crunchbase的结果）：**
+
 {snippets_text}
 
-请仔细分析并返回JSON。"""
+---
+
+请深度分析上述搜索结果，找出决策人姓名，并生成最可能的个人邮箱。返回JSON格式。"""
     
     response = model.generate_content(prompt)
     result = response.text.strip()
@@ -1099,11 +1487,36 @@ def search_decision_maker_emails(serper_key: str, gemini_key: str, company_name:
     
     try:
         email_data = json.loads(result)
+        
         # 确保有必要的字段
         email_data.setdefault('decision_maker', 'Team')
+        email_data.setdefault('decision_maker_title', '')
         email_data.setdefault('personal_email', '')
-        email_data.setdefault('generic_email', f"info@{company_name.lower().replace(' ', '')}.com")
+        email_data.setdefault('personal_email_alternatives', [])
+        email_data.setdefault('generic_email', f"info@{company_domain_guess}.com")
+        email_data.setdefault('company_domain', f"{company_domain_guess}.com")
         email_data.setdefault('confidence', 'low')
+        
+        # 🔥 如果AI返回了决策人姓名但没有生成个人邮箱，自动补充
+        if email_data['decision_maker'] and email_data['decision_maker'] != 'Team' and not email_data['personal_email']:
+            name_parts = email_data['decision_maker'].lower().split()
+            domain = email_data.get('company_domain', f"{company_domain_guess}.com")
+            if len(name_parts) >= 1:
+                firstname = name_parts[0]
+                lastname = name_parts[-1] if len(name_parts) > 1 else ''
+                
+                # 生成个人邮箱推测
+                email_data['personal_email'] = f"{firstname}@{domain}"
+                email_data['personal_email_alternatives'] = []
+                if lastname:
+                    email_data['personal_email_alternatives'].extend([
+                        f"{firstname}.{lastname}@{domain}",
+                        f"{firstname[0]}.{lastname}@{domain}",
+                        f"{firstname[0]}{lastname}@{domain}",
+                        f"{firstname}{lastname}@{domain}",
+                        f"{lastname}@{domain}",
+                    ])
+        
         return email_data
     except:
         return {
@@ -1111,8 +1524,8 @@ def search_decision_maker_emails(serper_key: str, gemini_key: str, company_name:
             "decision_maker_title": "",
             "personal_email": "",
             "personal_email_alternatives": [],
-            "generic_email": f"info@{company_name.lower().replace(' ', '')}.com",
-            "company_domain": f"{company_name.lower().replace(' ', '')}.com",
+            "generic_email": f"info@{company_domain_guess}.com",
+            "company_domain": f"{company_domain_guess}.com",
             "confidence": "low"
         }
 
@@ -1266,59 +1679,117 @@ def search_company_info(serper_key: str, company_name: str) -> dict:
     return all_results
 
 def analyze_company_with_ai(api_key: str, company_name: str, search_results: dict) -> dict:
-    """Use Gemini to analyze search results and extract decision maker info with personal email."""
+    """
+    Use Gemini to analyze search results and extract decision maker info with personal email.
+    🔥 增强版：更积极地挖掘决策人姓名和推测个人邮箱
+    """
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel('gemini-2.0-flash')
     
-    # Prepare search snippets
+    # 智能提取公司域名
+    company_clean = company_name.lower()
+    for suffix in [' inc', ' inc.', ' llc', ' ltd', ' ltd.', ' gmbh', ' bv', ' b.v.', ' co', ' co.', ' corp', ' corporation', ' limited']:
+        company_clean = company_clean.replace(suffix, '')
+    company_domain_guess = company_clean.replace(" ", "").replace("-", "").replace("&", "and").replace("'", "")
+    
+    # 从搜索结果中提取实际域名
+    actual_domain = None
+    if 'organic' in search_results:
+        for result in search_results['organic'][:10]:
+            link = result.get('link', '')
+            # 提取域名
+            if 'linkedin.com' not in link and 'facebook.com' not in link and 'twitter.com' not in link:
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(link)
+                    domain = parsed.netloc.replace('www.', '')
+                    if domain and '.' in domain:
+                        actual_domain = domain
+                        break
+                except:
+                    pass
+    
+    domain_to_use = actual_domain if actual_domain else f"{company_domain_guess}.com"
+    
+    # Prepare search snippets - 增加到25条
     snippets = []
     if 'organic' in search_results:
-        for result in search_results['organic'][:15]:  # 增加到15条结果
+        for result in search_results['organic'][:25]:
             snippets.append(f"Title: {result.get('title', '')}\nSnippet: {result.get('snippet', '')}\nLink: {result.get('link', '')}")
     
     snippets_text = "\n\n".join(snippets) if snippets else "No search results found."
     
-    prompt = f"""You are an expert B2B sales researcher. Your job is to find the DECISION MAKER and their PERSONAL EMAIL.
+    prompt = f"""You are an elite B2B sales researcher. Your CRITICAL mission is to find the DECISION MAKER'S NAME and generate their PERSONAL EMAIL.
 
-TASK: Analyze the search results for "{company_name}" and extract:
+**Target Company:** "{company_name}"
+**Likely Domain:** {domain_to_use}
 
-1. **Decision Maker Name** - Look for:
-   - CEO, Owner, Founder, President, Director names
-   - Names in LinkedIn titles (e.g., "John Smith - CEO at Company")
-   - Names mentioned as "founded by", "owned by", "managed by"
+# 🎯 PRIMARY GOAL: Find the decision maker's REAL NAME and create their PERSONAL email address
 
-2. **Email Addresses** - Find TWO types:
-   - **Personal Email**: The decision maker's direct email (firstname@, firstname.lastname@, etc.)
-   - **Generic Email**: Company general email (info@, contact@, hello@)
+## Step 1: Extract Decision Maker Name (CRITICAL!)
 
-3. **Business Type** - What industry/sector (Jewelry, Restaurant, Gym, Tech, Retail, etc.)
+Search for these patterns in the results:
+- LinkedIn: "John Smith - CEO at {company_name}"
+- News: "{company_name} founder John Smith announced..."
+- About page: "Founded by John Smith in 2015"
+- Team page: "Our CEO, John Smith, leads..."
 
-4. **Pain Point** - What problem this business type typically faces
+Common title keywords: CEO, Founder, Owner, President, Director, Managing Director, Partner, Principal
 
-IMPORTANT EMAIL RULES:
-- If you find a real person's name, generate their likely personal email using these patterns:
-  * firstname@domain.com (most common)
-  * firstname.lastname@domain.com
-  * f.lastname@domain.com
-  * firstnamelastname@domain.com
-- Extract the company domain from any URLs in the results
-- PRIORITIZE personal email over generic email
-- If LinkedIn shows "john.smith@company.com" format, use that pattern
+## Step 2: Extract Company Domain
 
-Return ONLY a JSON object:
+Look at URLs in search results:
+- If you see "https://abccompany.nl/contact" → domain is "abccompany.nl"
+- Prefer actual URLs from search results over guesses
+
+## Step 3: Generate Personal Email (MANDATORY if name found!)
+
+**You MUST generate personal email if you find a name. Never skip this!**
+
+For "John Smith" + "abccompany.com":
+1. john@abccompany.com (MOST COMMON - use this as primary)
+2. john.smith@abccompany.com
+3. j.smith@abccompany.com
+4. jsmith@abccompany.com
+
+## Step 4: Identify Business Type & Pain Point
+
+Determine what industry they're in and their likely challenges.
+
+---
+
+**Return this EXACT JSON structure:**
+
+```json
 {{
-    "decision_maker": "Full Name (or 'Team' if not found)",
-    "personal_email": "firstname@domain.com (best guess for decision maker)",
-    "generic_email": "info@domain.com (company general email)",
-    "email": "USE personal_email if available, otherwise generic_email",
+    "decision_maker": "John Smith (REAL NAME - not 'Team' unless absolutely impossible)",
+    "decision_maker_title": "CEO",
+    "personal_email": "john@abccompany.com (PERSONAL email using firstname@domain)",
+    "personal_email_alternatives": ["john.smith@abccompany.com", "j.smith@abccompany.com"],
+    "generic_email": "info@abccompany.com",
+    "email": "john@abccompany.com (ALWAYS use personal_email here if available!)",
+    "company_domain": "abccompany.com",
     "business_type": "Industry/Sector",
-    "pain_point": "Key challenge for this business"
+    "pain_point": "Key business challenge"
 }}
+```
 
-SEARCH RESULTS:
+## ⚠️ STRICT RULES:
+
+1. **personal_email MUST be firstname@domain or firstname.lastname@domain** - NEVER info@, contact@, hello@, sales@
+2. **If you find ANY human name, you MUST generate their personal email**
+3. **The "email" field should be the personal_email, NOT the generic one**
+4. **Only use "Team" if you truly cannot find ANY name in ANY result**
+
+---
+
+**SEARCH RESULTS TO ANALYZE:**
+
 {snippets_text}
 
-Analyze carefully and return the JSON. Focus on finding real names and generating accurate personal emails."""
+---
+
+Analyze every result carefully. Find the name. Generate the personal email. Return JSON."""
     
     response = model.generate_content(prompt)
     
@@ -1332,16 +1803,50 @@ Analyze carefully and return the JSON. Focus on finding real names and generatin
     
     try:
         data = json.loads(result)
-        # 确保使用个人邮箱优先
-        if data.get('personal_email') and data.get('personal_email') != data.get('generic_email'):
-            data['email'] = data['personal_email']
+        
+        # 🔥 强制确保使用个人邮箱
+        personal = data.get('personal_email', '')
+        generic = data.get('generic_email', f"info@{domain_to_use}")
+        
+        # 检查personal_email是否真的是个人邮箱（不是通用邮箱）
+        generic_prefixes = ['info@', 'contact@', 'hello@', 'sales@', 'support@', 'admin@', 'office@', 'team@']
+        is_personal_valid = personal and not any(personal.lower().startswith(prefix) for prefix in generic_prefixes)
+        
+        if is_personal_valid:
+            data['email'] = personal
+        else:
+            # 如果有决策人姓名但没有有效的个人邮箱，自动生成
+            dm_name = data.get('decision_maker', '')
+            if dm_name and dm_name != 'Team' and dm_name.lower() != 'team':
+                name_parts = dm_name.lower().split()
+                if len(name_parts) >= 1:
+                    firstname = name_parts[0]
+                    lastname = name_parts[-1] if len(name_parts) > 1 else ''
+                    domain = data.get('company_domain', domain_to_use)
+                    
+                    data['personal_email'] = f"{firstname}@{domain}"
+                    data['email'] = data['personal_email']
+                    
+                    if lastname and lastname != firstname:
+                        data['personal_email_alternatives'] = [
+                            f"{firstname}.{lastname}@{domain}",
+                            f"{firstname[0]}.{lastname}@{domain}",
+                            f"{firstname}{lastname}@{domain}",
+                        ]
+            else:
+                data['email'] = generic
+        
+        data.setdefault('generic_email', generic)
+        data.setdefault('company_domain', domain_to_use)
+        
         return data
     except:
         return {
             "decision_maker": "Team",
             "personal_email": "",
-            "generic_email": f"info@{company_name.lower().replace(' ', '')}.com",
-            "email": f"info@{company_name.lower().replace(' ', '')}.com",
+            "generic_email": f"info@{domain_to_use}",
+            "email": f"info@{domain_to_use}",
+            "company_domain": domain_to_use,
             "business_type": "Business",
             "pain_point": "Standing out in a competitive market"
         }
@@ -1989,6 +2494,527 @@ with st.sidebar:
 st.markdown('<h1 class="main-header">📧 AI Email Marketing System</h1>', unsafe_allow_html=True)
 st.markdown('<p class="sub-header">AI问答 → 搜索邮箱 → 生成开发信 → 自动发送</p>', unsafe_allow_html=True)
 
+# ============================================
+# 🔥 全局断点续传检测 - 页面顶部醒目提示
+# ============================================
+_pending_progress = load_sending_progress()
+if _pending_progress and _pending_progress.get('status') == 'sending':
+    _sent_count = len(_pending_progress.get('sent_results', []))
+    _total_count = _pending_progress.get('total_emails', 0)
+    _unsent_count = _total_count - _sent_count
+    _last_updated = _pending_progress.get('last_updated', '未知')
+    
+    st.markdown(f"""
+    <div style="background: linear-gradient(135deg, rgba(168, 50, 50, 0.3), rgba(201, 162, 39, 0.3)); 
+                padding: 15px 20px; border-radius: 12px; margin: 10px 0 20px 0; 
+                border: 2px solid rgba(201, 162, 39, 0.6);
+                animation: pulse-border 2s infinite;">
+        <style>
+            @keyframes pulse-border {{
+                0% {{ border-color: rgba(201, 162, 39, 0.6); }}
+                50% {{ border-color: rgba(168, 50, 50, 0.8); }}
+                100% {{ border-color: rgba(201, 162, 39, 0.6); }}
+            }}
+        </style>
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 15px;">
+            <div>
+                <span style="color: #FF6B6B; font-size: 1.3rem; font-weight: bold;">
+                    ⚠️ 发现中断的发送任务！
+                </span>
+                <span style="color: #E8D5B7; font-size: 0.95rem; margin-left: 10px;">
+                    已发送 <b style="color: #2D8B4E;">{_sent_count}</b> / {_total_count} 封，
+                    剩余 <b style="color: #C9A227;">{_unsent_count}</b> 封待发送
+                </span>
+                <div style="color: #8B7355; font-size: 0.8rem; margin-top: 5px;">
+                    最后活动: {_last_updated}
+                </div>
+            </div>
+            <div style="color: #E8D5B7; font-size: 0.9rem;">
+                👇 请滚动到 <b style="color: #C9A227;">Step 4</b> 继续发送
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# ============================================
+# 🚀 一键自动化操作区域
+# ============================================
+with st.expander("🚀 **一键自动化操作** - 全流程自动完成", expanded=not st.session_state.auto_mode):
+    st.markdown("""
+    <div style="background: linear-gradient(135deg, rgba(45, 139, 78, 0.15), rgba(201, 162, 39, 0.15)); 
+                padding: 15px; border-radius: 10px; margin-bottom: 15px;
+                border: 1px solid rgba(201, 162, 39, 0.3);">
+        <div style="color: #C9A227; font-weight: bold; font-size: 1.1rem; margin-bottom: 8px;">
+            ✨ 一键完成全部流程
+        </div>
+        <div style="color: #E8D5B7; font-size: 0.9rem; line-height: 1.6;">
+            输入你的需求，系统将自动完成：AI查询目标公司 → 搜索决策人邮箱 → 生成个性化开发信 → 准备发送<br>
+            <b>适用场景：</b>快速批量开发新客户，省去繁琐的分步操作
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # 一键操作输入区
+    auto_col1, auto_col2 = st.columns([3, 1])
+    
+    with auto_col1:
+        auto_query = st.text_area(
+            "🎯 输入你的需求（一句话描述）",
+            placeholder="例如：帮我找20家德国的户外用品公司，推荐定制户外包袋和野餐垫产品",
+            height=80,
+            key="auto_query_input"
+        )
+        
+        auto_product_desc = st.text_area(
+            "📦 产品/服务描述（可选，用于生成更精准的开发信）",
+            value=st.session_state.product_services or "",
+            placeholder="例如：我们是专业的定制礼品供应商，主营环保袋、定制包装、促销赠品等",
+            height=68,
+            key="auto_product_input"
+        )
+    
+    with auto_col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        
+        # 检查API密钥
+        api_ready = gemini_key and serper_key
+        smtp_ready = sender_email and sender_password
+        
+        if not api_ready:
+            st.warning("⚠️ 请先在侧边栏配置 API Keys")
+        
+        auto_send_option = st.checkbox(
+            "📤 自动发送邮件",
+            value=False,
+            help="勾选后将自动发送生成的邮件，否则只生成邮件等待手动发送"
+        )
+        
+        if st.button("🚀 一键启动", use_container_width=True, type="primary", disabled=not api_ready):
+            if not auto_query.strip():
+                st.error("⚠️ 请输入你的需求")
+            else:
+                # 保存配置
+                st.session_state.auto_mode = True
+                st.session_state.auto_step = 1
+                st.session_state.auto_query = auto_query
+                st.session_state.auto_send_enabled = auto_send_option
+                if auto_product_desc:
+                    st.session_state.product_services = auto_product_desc
+                
+                # 清除之前的数据
+                st.session_state.companies = None
+                st.session_state.research_data = None
+                st.session_state.emails = None
+                st.session_state.send_results = None
+                st.session_state.ai_query_response = None
+                st.session_state.ai_parsed_companies = None
+                
+                st.rerun()
+
+# 🚀 一键自动化流程执行
+if st.session_state.auto_mode and st.session_state.auto_step > 0:
+    
+    auto_progress_container = st.container()
+    
+    with auto_progress_container:
+        # 显示自动化进度
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, rgba(45, 139, 78, 0.2), rgba(201, 162, 39, 0.1)); 
+                    padding: 20px; border-radius: 12px; margin: 15px 0;
+                    border: 2px solid rgba(45, 139, 78, 0.4);">
+            <div style="color: #2D8B4E; font-weight: bold; font-size: 1.3rem; margin-bottom: 10px;">
+                🚀 一键自动化执行中...
+            </div>
+            <div style="color: #E8D5B7; font-size: 0.9rem;">
+                当前步骤: <b>Step {st.session_state.auto_step}/4</b> - 
+                {'AI查询目标公司' if st.session_state.auto_step == 1 else 
+                 '搜索决策人邮箱' if st.session_state.auto_step == 2 else 
+                 '生成个性化开发信' if st.session_state.auto_step == 3 else 
+                 '发送邮件'}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        auto_status = st.empty()
+        auto_progress = st.progress(0)
+        auto_detail = st.empty()
+        
+        try:
+            # Step 1: AI查询获取公司列表
+            if st.session_state.auto_step == 1:
+                auto_status.info("🤖 Step 1/4: AI正在分析并整理目标公司列表...")
+                auto_progress.progress(10)
+                
+                # 调用AI查询
+                ai_response = query_target_companies(
+                    gemini_key, 
+                    st.session_state.auto_query, 
+                    st.session_state.product_services,
+                    exclude_sent=True  # 自动启用去重
+                )
+                st.session_state.ai_query_response = ai_response
+                auto_progress.progress(20)
+                
+                # 解析公司信息
+                auto_detail.text("   📋 解析公司信息...")
+                parsed_companies = parse_companies_from_ai_response(gemini_key, ai_response)
+                st.session_state.ai_parsed_companies = parsed_companies
+                
+                if parsed_companies:
+                    # 转换为DataFrame并标记已发送公司
+                    companies_df = pd.DataFrame({
+                        "Company Name": [c.get('company', '') for c in parsed_companies],
+                        "Country": [c.get('country', '') for c in parsed_companies],
+                        "Industry": [c.get('industry', '') for c in parsed_companies],
+                        "Strategy": [c.get('strategy', '') for c in parsed_companies],
+                        "Include": [True] * len(parsed_companies)
+                    })
+                    
+                    # 标记已发送公司
+                    sent_names_set = get_sent_company_names_set()
+                    for idx, row in companies_df.iterrows():
+                        company_name = row.get('Company Name', '').strip()
+                        if company_name.lower() in sent_names_set:
+                            companies_df.at[idx, 'Include'] = False
+                    
+                    st.session_state.companies = companies_df
+                    
+                    new_count = len(companies_df[companies_df['Include'] == True])
+                    auto_status.success(f"✅ Step 1 完成: 找到 {len(parsed_companies)} 家公司（{new_count} 家新公司）")
+                    auto_progress.progress(25)
+                    
+                    # 进入下一步
+                    st.session_state.auto_step = 2
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    st.session_state.auto_mode = False
+                    st.session_state.auto_step = 0
+                    st.error("❌ 未能解析出公司信息，请检查查询内容后重试")
+            
+            # Step 2: 搜索决策人邮箱
+            elif st.session_state.auto_step == 2:
+                auto_status.info("🔍 Step 2/4: 搜索决策人邮箱...")
+                auto_progress.progress(30)
+                
+                included_df = st.session_state.companies[st.session_state.companies['Include'] == True]
+                companies_to_research = included_df['Company Name'].tolist()
+                
+                if not companies_to_research:
+                    st.session_state.auto_mode = False
+                    st.session_state.auto_step = 0
+                    st.error("❌ 没有可搜索的新公司")
+                else:
+                    research_results = []
+                    total = len(companies_to_research)
+                    
+                    for i, company in enumerate(companies_to_research):
+                        auto_detail.text(f"   🔎 搜索: {company}... ({i+1}/{total})")
+                        auto_progress.progress(30 + int(20 * (i + 1) / total))
+                        
+                        company_row = included_df[included_df['Company Name'] == company].iloc[0]
+                        country = company_row.get('Country', '')
+                        industry = company_row.get('Industry', 'Business')
+                        strategy = company_row.get('Strategy', '')
+                        
+                        try:
+                            email_data = search_decision_maker_emails(serper_key, gemini_key, company, country)
+                            
+                            pain_point = 'Standing out in competitive market'
+                            product_recommendations = []
+                            
+                            if st.session_state.ai_parsed_companies:
+                                for pc in st.session_state.ai_parsed_companies:
+                                    if pc.get('company') == company:
+                                        pain_point = pc.get('pain_point', pain_point)
+                                        product_recommendations = pc.get('product_recommendations', [])
+                                        break
+                            
+                            research_results.append({
+                                'company': company,
+                                'country': country,
+                                'industry': industry,
+                                'strategy': strategy,
+                                'decision_maker': email_data.get('decision_maker', 'Team'),
+                                'personal_email': email_data.get('personal_email', ''),
+                                'generic_email': email_data.get('generic_email', f"info@{company.lower().replace(' ', '')}.com"),
+                                'confidence': email_data.get('confidence', 'low'),
+                                'business_type': industry or 'Business',
+                                'pain_point': pain_point,
+                                'product_recommendations': product_recommendations
+                            })
+                        except Exception as e:
+                            research_results.append({
+                                'company': company,
+                                'country': country,
+                                'industry': industry,
+                                'strategy': strategy,
+                                'decision_maker': 'Team',
+                                'personal_email': '',
+                                'generic_email': f"info@{company.lower().replace(' ', '')}.com",
+                                'confidence': 'low',
+                                'business_type': industry or 'Business',
+                                'pain_point': 'Standing out in competitive market',
+                                'product_recommendations': []
+                            })
+                    
+                    st.session_state.research_data = pd.DataFrame(research_results)
+                    auto_status.success(f"✅ Step 2 完成: 找到 {len(research_results)} 家公司的联系信息")
+                    auto_progress.progress(50)
+                    
+                    st.session_state.auto_step = 3
+                    time.sleep(1)
+                    st.rerun()
+            
+            # Step 3: 生成个性化开发信
+            elif st.session_state.auto_step == 3:
+                auto_status.info("✍️ Step 3/4: 生成个性化开发信...")
+                auto_progress.progress(55)
+                
+                emails = []
+                research_df = st.session_state.research_data
+                total = len(research_df)
+                
+                for i, row in research_df.iterrows():
+                    auto_detail.text(f"   ✉️ 生成邮件: {row['company']}... ({i+1}/{total})")
+                    auto_progress.progress(55 + int(30 * (i + 1) / total))
+                    
+                    # 准备公司数据
+                    company_data = {
+                        'company': row['company'],
+                        'decision_maker': row['decision_maker'],
+                        'country': row.get('country', ''),
+                        'industry': row.get('industry', row.get('business_type', 'Business')),
+                        'business_type': row.get('business_type', row.get('industry', 'Business')),
+                        'pain_point': row.get('pain_point', 'Standing out in competitive market'),
+                        'strategy': row.get('strategy', ''),
+                        'product_recommendations': row.get('product_recommendations', [])
+                    }
+                    
+                    try:
+                        email_content = generate_personalized_cold_email(
+                            gemini_key, 
+                            company_data, 
+                            st.session_state.product_services
+                        )
+                        
+                        # 处理个人邮箱
+                        personal_email = row.get('personal_email', '')
+                        generic_email = row.get('generic_email', '')
+                        
+                        if personal_email and personal_email != generic_email:
+                            emails.append({
+                                'company': row['company'],
+                                'country': row.get('country', ''),
+                                'decision_maker': row['decision_maker'],
+                                'to_email': personal_email,
+                                'email_type': '个人',
+                                'subject': email_content['subject'],
+                                'body': email_content['body'],
+                                'pain_point': row.get('pain_point', ''),
+                                'strategy': row.get('strategy', ''),
+                                'send': True
+                            })
+                        
+                        if generic_email:
+                            emails.append({
+                                'company': row['company'],
+                                'country': row.get('country', ''),
+                                'decision_maker': row['decision_maker'],
+                                'to_email': generic_email,
+                                'email_type': '通用',
+                                'subject': email_content['subject'],
+                                'body': email_content['body'],
+                                'pain_point': row.get('pain_point', ''),
+                                'strategy': row.get('strategy', ''),
+                                'send': True
+                            })
+                    except Exception as e:
+                        continue
+                
+                st.session_state.emails = emails
+                auto_status.success(f"✅ Step 3 完成: 生成 {len(emails)} 封个性化开发信")
+                auto_progress.progress(85)
+                
+                # 检查是否需要自动发送
+                if st.session_state.auto_send_enabled:
+                    st.session_state.auto_step = 4
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    # 完成，不自动发送
+                    st.session_state.auto_mode = False
+                    st.session_state.auto_step = 0
+                    auto_progress.progress(100)
+                    st.success("🎉 一键自动化完成！邮件已生成，请在下方 Step 4 手动发送")
+                    time.sleep(2)
+                    st.rerun()
+            
+            # Step 4: 发送邮件（如果启用了自动发送）
+            elif st.session_state.auto_step == 4:
+                auto_status.info("📤 Step 4/4: 正在发送邮件...")
+                auto_progress.progress(90)
+                
+                # 检查邮箱配置
+                email_config_valid = all([smtp_server, sender_email, sender_password])
+                if email_send_mode == "rotate":
+                    email_config_valid = email_config_valid and all([sender_email_2, sender_password_2])
+                
+                if not email_config_valid:
+                    st.session_state.auto_mode = False
+                    st.session_state.auto_step = 0
+                    st.error("⚠️ 请在侧边栏配置邮箱设置后重新启动")
+                else:
+                    # 获取邮件列表并去重
+                    all_emails = st.session_state.emails.copy()
+                    all_emails, filtered_emails = filter_unsent_emails(all_emails)
+                    
+                    if filtered_emails:
+                        auto_detail.text(f"   🚫 已过滤 {len(filtered_emails)} 家重复公司")
+                    
+                    if not all_emails:
+                        st.session_state.auto_mode = False
+                        st.session_state.auto_step = 0
+                        st.error("⚠️ 所有公司都已发送过邮件！")
+                    else:
+                        # 准备SMTP配置
+                        smtp_settings_list = []
+                        smtp_settings_1 = {
+                            'server': smtp_server,
+                            'port': smtp_port,
+                            'email': sender_email,
+                            'password': sender_password
+                        }
+                        smtp_settings_list.append(smtp_settings_1)
+                        
+                        if email_send_mode == "rotate" and sender_email_2 and sender_password_2:
+                            smtp_settings_2 = {
+                                'server': smtp_server,
+                                'port': smtp_port,
+                                'email': sender_email_2,
+                                'password': sender_password_2
+                            }
+                            smtp_settings_list.append(smtp_settings_2)
+                        
+                        # 准备图片数据
+                        image_data = None
+                        if marketing_image:
+                            marketing_image.seek(0)
+                            image_data = marketing_image.read()
+                        
+                        # 开始发送
+                        send_results = []
+                        success_count = 0
+                        fail_count = 0
+                        total_emails = len(all_emails)
+                        
+                        for i, email in enumerate(all_emails):
+                            auto_detail.text(f"   📧 发送: {email['to_email']} ({i+1}/{total_emails})")
+                            auto_progress.progress(90 + int(9 * (i + 1) / total_emails))
+                            
+                            # 选择SMTP配置（轮换）
+                            current_smtp = smtp_settings_list[i % len(smtp_settings_list)]
+                            
+                            # 发送间隔
+                            if i > 0:
+                                for countdown in range(10, 0, -1):
+                                    auto_detail.text(f"   ⏳ 等待 {countdown} 秒...")
+                                    time.sleep(1)
+                            
+                            try:
+                                success, message = send_email(
+                                    current_smtp,
+                                    email['to_email'],
+                                    email['subject'],
+                                    email['body'],
+                                    image_data
+                                )
+                                
+                                if success:
+                                    success_count += 1
+                                    status = 'Success'
+                                else:
+                                    fail_count += 1
+                                    status = 'Failed'
+                                
+                                send_results.append({
+                                    'company': email['company'],
+                                    'to_email': email['to_email'],
+                                    'email_type': email.get('email_type', ''),
+                                    'status': status,
+                                    'message': message,
+                                    'send_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    'sender': current_smtp['email']
+                                })
+                            except Exception as e:
+                                fail_count += 1
+                                send_results.append({
+                                    'company': email['company'],
+                                    'to_email': email['to_email'],
+                                    'email_type': email.get('email_type', ''),
+                                    'status': 'Failed',
+                                    'message': str(e),
+                                    'send_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    'sender': current_smtp['email']
+                                })
+                        
+                        # 保存发送结果
+                        st.session_state.send_results = pd.DataFrame(send_results)
+                        
+                        # 保存历史记录
+                        ensure_history_dir()
+                        history_data = {
+                            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                            'emails': st.session_state.emails,
+                            'send_results': send_results,
+                            'summary': {
+                                'total': total_emails,
+                                'success': success_count,
+                                'failed': fail_count
+                            }
+                        }
+                        
+                        history_filename = f"send_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+                        history_filepath = os.path.join(HISTORY_DIR, history_filename)
+                        with open(history_filepath, 'w', encoding='utf-8') as f:
+                            json.dump(history_data, f, ensure_ascii=False, indent=2, default=str)
+                        
+                        # 清除发送进度
+                        clear_sending_progress()
+                        
+                        # 完成
+                        st.session_state.auto_mode = False
+                        st.session_state.auto_step = 0
+                        auto_progress.progress(100)
+                        
+                        auto_status.empty()
+                        auto_detail.empty()
+                        
+                        st.markdown(f"""
+                        <div style="background: linear-gradient(135deg, rgba(45, 139, 78, 0.3), rgba(45, 139, 78, 0.1)); 
+                                    padding: 25px; border-radius: 15px; text-align: center; margin: 20px 0;
+                                    border: 2px solid rgba(45, 139, 78, 0.5);">
+                            <div style="color: #2D8B4E; font-size: 2rem; font-weight: bold; margin-bottom: 15px;">
+                                🎉 一键自动化全部完成！
+                            </div>
+                            <div style="color: #FAF8F5; font-size: 1.1rem; line-height: 2;">
+                                📧 共发送: <b style="color: #C9A227;">{total_emails}</b> 封邮件<br>
+                                ✅ 成功: <b style="color: #2D8B4E;">{success_count}</b> 封<br>
+                                ❌ 失败: <b style="color: #A83232;">{fail_count}</b> 封
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        time.sleep(3)
+                        st.rerun()
+                
+        except Exception as e:
+            st.session_state.auto_mode = False
+            st.session_state.auto_step = 0
+            st.error(f"❌ 自动化执行出错: {str(e)}")
+
+st.markdown('<div class="custom-divider"></div>', unsafe_allow_html=True)
+
 # Progress indicator
 col1, col2, col3, col4, col5, col6 = st.columns(6)
 steps = [
@@ -2125,8 +3151,22 @@ if input_mode == "ai_query":
                                 "Strategy": [c.get('strategy', '') for c in parsed_companies],
                                 "Include": [True] * len(parsed_companies)
                             })
+                            
+                            # 🚫 标记已发送过的公司
+                            sent_names_set = get_sent_company_names_set()
+                            already_sent_count = 0
+                            for idx, row in companies_df.iterrows():
+                                company_name = row.get('Company Name', '').strip()
+                                if company_name.lower() in sent_names_set:
+                                    # 自动取消勾选已发送的公司
+                                    companies_df.at[idx, 'Include'] = False
+                                    already_sent_count += 1
+                            
                             st.session_state.companies = companies_df
-                            st.success(f"✅ 成功解析 {len(parsed_companies)} 家目标公司！")
+                            
+                            if already_sent_count > 0:
+                                st.warning(f"⚠️ 发现 {already_sent_count} 家公司历史上已发送过，已自动取消勾选")
+                            st.success(f"✅ 成功解析 {len(parsed_companies)} 家目标公司！（{len(parsed_companies) - already_sent_count} 家新公司）")
                         else:
                             st.warning("⚠️ 未能解析出公司信息，请查看AI回答并手动提取")
                         
@@ -2251,6 +3291,11 @@ if st.session_state.companies is not None:
     included_df = st.session_state.companies[st.session_state.companies['Include'] == True]
     included_companies = included_df['Company Name'].tolist()
     
+    # 🚫 研究阶段去重检查 - 显示哪些公司已发送过
+    sent_names_set = get_sent_company_names_set()
+    already_sent_in_list = [c for c in included_companies if c.strip().lower() in sent_names_set]
+    new_companies_in_list = [c for c in included_companies if c.strip().lower() not in sent_names_set]
+    
     # 检查是否有AI问答模式的额外信息
     has_ai_data = 'Country' in included_df.columns and 'Strategy' in included_df.columns
     
@@ -2262,20 +3307,43 @@ if st.session_state.companies is not None:
         </div>
         """, unsafe_allow_html=True)
     
-    st.info(f"📊 已选择 **{len(included_companies)}** 家公司进行决策人搜索")
+    # 🚫 显示去重状态
+    if already_sent_in_list:
+        st.markdown(f"""
+        <div style="background: rgba(168, 50, 50, 0.15); padding: 12px; border-radius: 8px; margin: 10px 0; border: 1px solid rgba(168, 50, 50, 0.4);">
+            <span style="color: #FF6B6B;">⚠️ <b>发现重复公司</b></span>
+            <span style="color: #E8D5B7; font-size: 0.9rem;"> - 以下 <b>{len(already_sent_in_list)}</b> 家公司历史上已发送过邮件，将被自动跳过：</span>
+            <div style="color: #FF9999; font-size: 0.85rem; margin-top: 8px;">
+                {', '.join(already_sent_in_list[:10])}{' 等' + str(len(already_sent_in_list)) + '家' if len(already_sent_in_list) > 10 else ''}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    st.info(f"📊 已选择 **{len(included_companies)}** 家公司（其中 **{len(new_companies_in_list)}** 家为新公司，**{len(already_sent_in_list)}** 家已发送过）")
     
     if st.button("🔎 搜索决策人邮箱", use_container_width=True, type="primary"):
         if not gemini_key or not serper_key:
             st.error("⚠️ 请在侧边栏输入Gemini API Key和Serper API Key")
         else:
+            # 🚫 只搜索未发送过的新公司
+            companies_to_research = new_companies_in_list
+            skipped_companies = already_sent_in_list
+            
+            if not companies_to_research:
+                st.error("⚠️ 所有选中的公司都已经发送过邮件！请添加新的公司或取消勾选已发送的公司。")
+                st.stop()
+            
+            if skipped_companies:
+                st.info(f"🚫 已自动跳过 {len(skipped_companies)} 家历史已发送公司，将搜索剩余 {len(companies_to_research)} 家新公司")
+            
             research_results = []
             progress_bar = st.progress(0)
             status_text = st.empty()
             detail_text = st.empty()
             
-            for i, company in enumerate(included_companies):
-                status_text.text(f"🔍 正在搜索: {company}... ({i+1}/{len(included_companies)})")
-                progress_bar.progress((i + 1) / len(included_companies))
+            for i, company in enumerate(companies_to_research):
+                status_text.text(f"🔍 正在搜索: {company}... ({i+1}/{len(companies_to_research)})")
+                progress_bar.progress((i + 1) / len(companies_to_research))
                 
                 # 获取AI问答模式的额外信息
                 company_row = included_df[included_df['Company Name'] == company].iloc[0] if has_ai_data else None
@@ -2630,7 +3698,7 @@ if pending_progress and pending_progress.get('status') == 'sending':
     </div>
     """, unsafe_allow_html=True)
     
-    col_resume, col_discard = st.columns(2)
+    col_resume, col_auto, col_discard = st.columns(3)
     
     with col_resume:
         if st.button("🔄 继续发送剩余邮件", use_container_width=True, type="primary"):
@@ -2640,11 +3708,32 @@ if pending_progress and pending_progress.get('status') == 'sending':
             st.session_state.resume_mode = True
             st.rerun()
     
+    with col_auto:
+        # 自动继续发送选项
+        auto_resume = st.checkbox("⚡ 自动继续", value=False, help="勾选后点击继续发送将自动执行，无需再次点击发送按钮")
+        if auto_resume:
+            st.info("⚡ 自动继续模式：将自动开始发送剩余邮件")
+            # 设置自动恢复标记
+            st.session_state.emails = pending_progress.get('all_emails', [])
+            st.session_state.resume_progress = pending_progress
+            st.session_state.resume_mode = True
+            st.session_state.auto_resume_sending = True
+    
     with col_discard:
-        if st.button("🗑️ 放弃并开始新任务", use_container_width=True):
+        if st.button("🗑️ 放弃任务", use_container_width=True):
             clear_sending_progress()
             st.success("✅ 已清除未完成的任务，可以开始新的发送。")
             st.rerun()
+    
+    # 保活提示
+    st.markdown("""
+    <div style="background: rgba(45, 139, 78, 0.1); padding: 10px 15px; border-radius: 8px; margin-top: 10px; border: 1px solid rgba(45, 139, 78, 0.3);">
+        <span style="color: #2D8B4E; font-weight: bold;">💡 保活提示：</span>
+        <span style="color: #E8D5B7; font-size: 0.9rem;">
+            为防止发送中断，请确保：① 不要关闭浏览器标签页 ② 手机用户保持屏幕常亮 ③ 避免切换到其他应用
+        </span>
+    </div>
+    """, unsafe_allow_html=True)
     
     st.markdown("---")
 
@@ -2881,6 +3970,19 @@ if st.session_state.emails is not None:
     
     st.markdown("")
     
+    # 🔥 检测是否需要自动恢复发送
+    should_auto_send = st.session_state.get('auto_resume_sending', False) and st.session_state.get('resume_mode', False)
+    
+    if should_auto_send:
+        st.session_state.auto_resume_sending = False  # 重置标记，防止重复触发
+        st.markdown("""
+        <div style="background: rgba(45, 139, 78, 0.2); padding: 15px; border-radius: 10px; text-align: center; margin: 15px 0; border: 1px solid rgba(45, 139, 78, 0.4);">
+            <div style="color: #2D8B4E; font-size: 1.2rem; font-weight: bold;">
+                ⚡ 自动恢复发送中...
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
@@ -2898,7 +4000,8 @@ if st.session_state.emails is not None:
             else:
                 send_btn_label = "⏰ 定时发送"
         
-        if st.button(send_btn_label, use_container_width=True, type="primary"):
+        # 如果是自动恢复模式，或者用户点击了发送按钮
+        if should_auto_send or st.button(send_btn_label, use_container_width=True, type="primary"):
             # 检查邮箱配置
             email_config_valid = all([smtp_server, sender_email, sender_password])
             if email_send_mode == "rotate":
@@ -3075,6 +4178,18 @@ if st.session_state.emails is not None:
                 
                 # 开始发送邮件
                 all_emails = st.session_state.emails.copy()
+                
+                # 🚫 发送前硬性去重检查 - 过滤掉历史上已发送过的公司
+                all_emails, filtered_emails = filter_unsent_emails(all_emails)
+                
+                if filtered_emails:
+                    st.warning(f"🚫 **去重过滤**：已自动排除 {len(filtered_emails)} 家历史已发送公司：{', '.join([e.get('company', '') for e in filtered_emails[:5]])}" + 
+                              (f" 等{len(filtered_emails)}家" if len(filtered_emails) > 5 else ""))
+                
+                if not all_emails:
+                    st.error("⚠️ 所有公司都已经发送过邮件，没有可发送的新公司！")
+                    st.stop()
+                
                 total_all_emails = len(all_emails)
                 
                 # 🔥 检查是否是恢复模式
@@ -3190,9 +4305,9 @@ if st.session_state.emails is not None:
                     current_sender = current_smtp['email']
                     sender_label = f"📧{(i % len(smtp_settings_list)) + 1}" if len(smtp_settings_list) > 1 else "📧"
                     
-                    # 发送延迟：每封邮件间隔20秒，避免被邮件服务商封号
+                    # 发送延迟：每封邮件间隔10秒，避免被邮件服务商封号
                     if i > 0:
-                        delay = 20  # 固定20秒间隔
+                        delay = 10  # 固定10秒间隔
                         for countdown in range(delay, 0, -1):
                             status_text.markdown(f"""
                             <div style="color: #C9A227; font-size: 0.9rem;">
@@ -3385,7 +4500,7 @@ if st.session_state.emails is not None:
             <div style="background: rgba(201, 162, 39, 0.1); padding: 12px; border-radius: 8px; border: 1px solid rgba(201, 162, 39, 0.3);">
                 <div style="color: #C9A227; font-weight: bold; font-size: 0.9rem;">📧 发送提示</div>
                 <div style="color: #E8D5B7; font-size: 0.8rem; margin-top: 8px;">
-                    • 每封邮件间隔 20 秒<br>
+                    • 每封邮件间隔 10 秒<br>
                     • 避免触发垃圾邮件过滤<br>
                     • 建议先测试发送
                 </div>
