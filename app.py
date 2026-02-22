@@ -1387,9 +1387,9 @@ def search_decision_maker_emails(serper_key: str, gemini_key: str, company_name:
     genai.configure(api_key=gemini_key)
     model = genai.GenerativeModel('gemini-2.0-flash')
     
-    # 准备搜索结果摘要，增加到80条
+    # 准备搜索结果摘要
     snippets = []
-    for result in all_results['organic'][:80]:
+    for result in all_results['organic'][:20]:
         snippets.append(f"Title: {result.get('title', '')}\nSnippet: {result.get('snippet', '')}\nLink: {result.get('link', '')}")
     
     snippets_text = "\n\n".join(snippets) if snippets else "No search results found."
@@ -2917,7 +2917,7 @@ if st.session_state.auto_mode and st.session_state.auto_step > 0:
                             
                             # 发送间隔
                             if i > 0:
-                                for countdown in range(10, 0, -1):
+                                for countdown in range(5, 0, -1):
                                     auto_detail.text(f"   ⏳ 等待 {countdown} 秒...")
                                     time.sleep(1)
                             
@@ -4305,9 +4305,9 @@ if st.session_state.emails is not None:
                     current_sender = current_smtp['email']
                     sender_label = f"📧{(i % len(smtp_settings_list)) + 1}" if len(smtp_settings_list) > 1 else "📧"
                     
-                    # 发送延迟：每封邮件间隔10秒，避免被邮件服务商封号
+                    # 发送延迟：每封邮件间隔5秒，避免被邮件服务商封号
                     if i > 0:
-                        delay = 10  # 固定10秒间隔
+                        delay = 5  # 固定5秒间隔
                         for countdown in range(delay, 0, -1):
                             status_text.markdown(f"""
                             <div style="color: #C9A227; font-size: 0.9rem;">
@@ -4500,7 +4500,7 @@ if st.session_state.emails is not None:
             <div style="background: rgba(201, 162, 39, 0.1); padding: 12px; border-radius: 8px; border: 1px solid rgba(201, 162, 39, 0.3);">
                 <div style="color: #C9A227; font-weight: bold; font-size: 0.9rem;">📧 发送提示</div>
                 <div style="color: #E8D5B7; font-size: 0.8rem; margin-top: 8px;">
-                    • 每封邮件间隔 10 秒<br>
+                    • 每封邮件间隔 5 秒<br>
                     • 避免触发垃圾邮件过滤<br>
                     • 建议先测试发送
                 </div>
