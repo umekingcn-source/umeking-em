@@ -1288,69 +1288,33 @@ def search_decision_maker_emails(serper_key: str, gemini_key: str, company_name:
     country_tld = country_tld_map.get(country.lower(), '.com') if country else '.com'
     
     search_queries = [
-        # ===== 第一层：LinkedIn深度搜索（最有价值的决策人来源）=====
-        f'site:linkedin.com/in "{company_name}" CEO founder owner managing director {country}',
-        f'site:linkedin.com/in "{company_name}" president chief executive officer',
-        f'site:linkedin.com/in "{company_name}" eigenaar oprichter directeur',  # 荷兰语：老板/创始人/经理
-        f'site:linkedin.com/company "{company_name}" about',
+        # ===== 核心搜索：LinkedIn（最有价值）=====
+        f'site:linkedin.com/in "{company_name}" CEO founder owner director {country}',
         
-        # ===== 第二层：公司官网团队页面 =====
-        f'"{company_name}" "our team" OR "meet the team" OR "about us" OR "leadership" {country}',
-        f'"{company_name}" founder CEO owner "email" OR "@"',
+        # ===== 公司官网 + 邮箱 =====
+        f'"{company_name}" founder CEO owner email contact {country}',
         f'site:{company_domain_guess}.com OR site:{company_domain_guess}{country_tld} team about contact',
-        f'site:{company_domain_hyphen}.com team OR about OR contact',
         
-        # ===== 第三层：邮箱格式发现 =====
+        # ===== 邮箱格式发现 =====
         f'"{company_name}" "@{company_domain_guess}" email',
-        f'"{company_domain_guess}.com" OR "{company_domain_guess}{country_tld}" email CEO founder owner',
-        f'intext:"@{company_domain_guess}.com" OR intext:"@{company_domain_guess}{country_tld}"',
         
-        # ===== 第四层：商业数据库搜索 =====
-        f'site:crunchbase.com "{company_name}"',
-        f'site:zoominfo.com "{company_name}"',
-        f'site:apollo.io "{company_name}"',
-        f'site:rocketreach.co "{company_name}"',
-        f'site:leadiq.com "{company_name}"',
-        f'site:hunter.io "@{company_domain_guess}"',
+        # ===== 商业数据库（合并查询）=====
+        f'site:crunchbase.com OR site:zoominfo.com "{company_name}"',
         
-        # ===== 第五层：新闻和媒体报道 =====
-        f'"{company_name}" CEO OR founder announced OR interview OR "said" OR "stated" {country}',
-        f'"{company_name}" "founded by" OR "led by" OR "owned by"',
+        # ===== 新闻报道 =====
+        f'"{company_name}" "founded by" OR "led by" OR CEO founder {country}',
         
-        # ===== 第六层：公司注册信息 =====
-        f'"{company_name}" director registration company {country}',
-        f'"{company_name}" kvk OR "chamber of commerce" OR "company house" owner director',
+        # ===== 公司注册信息 =====
+        f'"{company_name}" director owner company registration {country}',
         
-        # ===== 第七层：社交媒体 =====
-        f'site:twitter.com OR site:x.com "{company_name}" CEO founder owner',
-        f'site:facebook.com/pages "{company_name}" about',
+        # ===== 社交媒体（合并）=====
+        f'site:instagram.com OR site:facebook.com "{company_name}" {country}',
         
-        # ===== 第八层：行业目录和B2B平台 =====
-        f'"{company_name}" contact email buyer seller {country}',
-        f'"{company_name}" wholesale OR distribution OR supplier contact',
+        # ===== B2B目录 =====
+        f'site:europages.com OR site:kompass.com "{company_name}"',
         
-        # ===== 🔥 第九层：小型企业专属搜索（老板信息更公开）=====
-        # Instagram商业账户（小店老板常用）
-        f'site:instagram.com "{company_name}" {country}',
-        # Google商家信息
-        f'"{company_name}" "google my business" OR "google maps" owner {country}',
-        # Yelp/TripAdvisor商家信息
-        f'site:yelp.com OR site:tripadvisor.com "{company_name}" owner',
-        # 本地商业目录（荷兰、欧洲）
-        f'site:detelefoongids.nl OR site:goudengids.nl "{company_name}"',  # 荷兰黄页
-        f'site:europages.com OR site:kompass.com "{company_name}"',  # 欧洲B2B目录
-        # Shopify/独立电商店主
-        f'"{company_name}" shopify OR "powered by shopify" owner founder',
-        # Etsy卖家（手工艺品店主）
-        f'site:etsy.com/shop "{company_name}"',
-        # 当地新闻/采访（小企业老板常接受采访）
-        f'"{company_name}" interview OR "talks to" OR "speaks with" owner founder {country}',
-        # 创业故事
-        f'"{company_name}" "started by" OR "launched by" OR "established by" {country}',
-        # 行业协会/商会成员
-        f'"{company_name}" member association OR chamber {country}',
-        # 公司简介页面
-        f'"{company_name}" "about us" "I started" OR "we started" OR "my passion"',
+        # ===== 公司简介 =====
+        f'"{company_name}" "about us" "our team" owner founder',
     ]
     
     all_results = {
